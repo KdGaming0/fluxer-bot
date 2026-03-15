@@ -27,6 +27,10 @@ Commands (all require the relevant Fluxer permission):
         !honeypot create <name>          - Create and designate a honeypot channel
         !honeypot set #channel           - Designate an existing channel
         !honeypot remove                 - Remove the honeypot designation
+        !honeypot logchannel #channel    - Set a dedicated channel for honeypot alerts
+        !honeypot logchannel             - Clear the honeypot log channel
+        !honeypot role @role             - Set a role to ping on honeypot alerts
+        !honeypot role                   - Clear the ping role
 
 Automatic protections (no commands needed):
     - Banned word filter
@@ -610,14 +614,22 @@ class ModerationCog(fluxer.Cog):
             await self._honeypot_set(ctx, parts)
         elif sub == "remove":
             await self._honeypot_remove(ctx)
+        elif sub == "logchannel":
+            await self._honeypot_logchannel(ctx, parts)
+        elif sub == "role":
+            await self._honeypot_role(ctx, parts)
         else:
             await ctx.reply(
                 embed=fluxer.Embed(
                     title="Honeypot commands",
                     description=(
-                        f"`{config.COMMAND_PREFIX}honeypot create <name>` — Create channel\n"
+                        f"`{config.COMMAND_PREFIX}honeypot create <n>` — Create channel\n"
                         f"`{config.COMMAND_PREFIX}honeypot set #channel` — Use existing channel\n"
-                        f"`{config.COMMAND_PREFIX}honeypot remove` — Remove designation"
+                        f"`{config.COMMAND_PREFIX}honeypot remove` — Remove designation\n"
+                        f"`{config.COMMAND_PREFIX}honeypot logchannel #channel` — Set dedicated alert channel\n"
+                        f"`{config.COMMAND_PREFIX}honeypot logchannel` — Clear alert channel\n"
+                        f"`{config.COMMAND_PREFIX}honeypot role @role` — Set role to ping on alerts\n"
+                        f"`{config.COMMAND_PREFIX}honeypot role` — Clear ping role"
                     ),
                     color=_COLOR_INFO,
                 )
@@ -687,6 +699,130 @@ class ModerationCog(fluxer.Cog):
                 color=_COLOR_OK,
             )
         )
+
+    async def _honeypot_logchannel(self, ctx: fluxer.Message, parts: list[str]) -> None:
+        """Set or clear the dedicated honeypot alert log channel.
+
+        Usage:  !honeypot logchannel #channel
+                !honeypot logchannel              <- clears it
+        """
+        arg = parts[1].strip() if len(parts) > 1 else ""
+
+        if not arg:
+            self.settings.delete(ctx.guild_id, "honeypot_log_channel_id")
+            await ctx.reply(
+                embed=fluxer.Embed(
+                    description="Honeypot log channel cleared. Alerts will fall back to the general mod log.",
+                    color=_COLOR_OK,
+                )
+            )
+            return
+
+        channel = None
+        match = re.search(r"<#(\d+)>", arg)
+        if match:
+            channel = self.bot._channels.get(int(match.group(1)))
+        else:
+            name = arg.lstrip("#").strip()
+            for ch in self.bot._channels.values():
+                if ch.guild_id == ctx.guild_id and ch.name == name:
+                    channel = ch
+                    break
+
+        if channel is None or not channel.is_text_channel:
+            await ctx.reply("Could not find that text channel.")
+            return
+
+        self.settings.set(ctx.guild_id, "honeypot_log_channel_id", channel.id)
+        log.info(
+            "Honeypot log channel set to #%s (%d) in guild %d",
+            channel.name, channel.id, ctx.guild_id,
+        )
+
+        ping_role_id = self.settings.get(ctx.guild_id, "honeypot_ping_role_id")
+        role_note = (
+            f"\nRole <@&{ping_role_id}> will be pinged on each alert."
+            if ping_role_id
+            else f"\nNo ping role set yet — use `{config.COMMAND_PREFIX}honeypot role @role` to add one."
+        )
+
+        await ctx.reply(
+            embed=fluxer.Embed(
+                title="Honeypot log channel set",
+                description=f"Honeypot alerts will be posted in **#{channel.name}**.{role_note}",
+                color=_COLOR_OK,
+            )
+        )
+
+    async def _honeypot_role(self, ctx: fluxer.Message, parts: list[str]) -> None:
+        """Set or clear the role to ping when the honeypot is triggered.
+
+        Usage:  !honeypot role @role
+                !honeypot role              <- clears it
+        """
+        arg = parts[1].strip() if len(parts) > 1 else ""
+
+        if not arg:
+            self.settings.delete(ctx.guild_id, "honeypot_ping_role_id")
+            await ctx.reply(
+                embed=fluxer.Embed(
+                    description="Honeypot ping role cleared. No role will be pinged on alerts.",
+                    color=_COLOR_OK,
+                )
+            )
+            return
+
+        match = re.fullmatch(r"<@&(\d+)>", arg) or re.fullmatch(r"(\d+)", arg)
+        if not match:
+            await ctx.reply(
+                f"Could not parse that as a role. Use a mention (`@Role`) or a raw role ID."
+            )
+            return
+
+        role_id = int(match.group(1))
+        self.settings.set(ctx.guild_id, "honeypot_ping_role_id", role_id)
+        log.info("Honeypot ping role set to %d in guild %d", role_id, ctx.guild_id)
+
+        log_channel_id = self.settings.get(ctx.guild_id, "honeypot_log_channel_id")
+        channel_note = (
+            f"\nAlerts will appear in <#{log_channel_id}>."
+            if log_channel_id
+            else f"\nNo log channel set yet — use `{config.COMMAND_PREFIX}honeypot logchannel #channel` to add one."
+        )
+
+        await ctx.reply(
+            embed=fluxer.Embed(
+                title="Honeypot ping role set",
+                description=f"<@&{role_id}> will be pinged whenever the honeypot is triggered.{channel_note}",
+                color=_COLOR_OK,
+            )
+        )
+
+    async def _post_honeypot_log(self, guild_id: int, embed: fluxer.Embed, ping_content: str) -> None:
+        """Post the honeypot alert to the dedicated log channel (with role ping),
+        falling back to the general mod log channel if no dedicated one is set."""
+        channel_id = (
+            self.settings.get(guild_id, "honeypot_log_channel_id")
+            or self.settings.get(guild_id, "modlog_channel_id")
+        )
+        if channel_id is None:
+            log.debug("No honeypot log or mod log channel configured for guild %d", guild_id)
+            return
+
+        channel = self.bot._channels.get(channel_id)
+        if channel is None:
+            log.warning("Honeypot log channel %d not found in guild %d", channel_id, guild_id)
+            return
+
+        try:
+            # Send the ping text as a plain message first so it actually notifies,
+            # then the embed follows immediately — keeps the embed clean.
+            if ping_content:
+                await channel.send(content=ping_content)
+            await channel.send(embed=embed)
+        except Exception as exc:
+            log.error("Failed to post honeypot log: %s", exc)
+
 
     async def _designate_honeypot(
         self, ctx: fluxer.Message, channel: fluxer.Channel
@@ -771,12 +907,14 @@ class ModerationCog(fluxer.Cog):
         # Mute the user for the maximum allowed duration
         member = await self._resolve_member(message.guild_id, message.author.id)
         timeout_until = self._iso_from_now(_HONEYPOT_TIMEOUT_DAYS * 86400)
+        mute_applied = False
         if member:
             try:
                 await member.timeout(
                     until=timeout_until,
                     reason="Honeypot channel triggered",
                 )
+                mute_applied = True
             except Exception as exc:
                 log.error("Could not timeout honeypot offender: %s", exc)
 
@@ -796,18 +934,58 @@ class ModerationCog(fluxer.Cog):
             except Exception as exc:
                 log.warning("Could not send honeypot warning message: %s", exc)
 
-        # Log to mod log
-        embed = self._mod_embed(
-            action="Honeypot Triggered",
-            target=f"{message.author.display_name} ({message.author.id})",
+        # ── Mod log — rich embed with full context and unmute shortcut ────────
+
+        # Truncate long messages but keep enough for context
+        raw_content = message.content.strip()
+        display_content = raw_content[:400] if raw_content else "_(empty message)_"
+        if len(raw_content) > 400:
+            display_content += f"\n_…({len(raw_content) - 400} more characters)_"
+
+        honeypot_channel = self.bot._channels.get(message.channel_id)
+        channel_ref = (
+            f"<#{message.channel_id}>"
+            if honeypot_channel
+            else f"channel `{message.channel_id}`"
+        )
+
+        # Build the unmute shortcut so a mod can copy-paste it immediately
+        unmute_cmd = (
+            f"`{config.COMMAND_PREFIX}untimeout <@{message.author.id}>`\n"
+            f"or by ID: `{config.COMMAND_PREFIX}untimeout {message.author.id}`"
+        )
+
+        mute_status = (
+            "✅ Applied — indefinite (awaiting review)"
+            if mute_applied
+            else "⚠️ Failed — check bot role hierarchy"
+        )
+
+        mod_log_embed = self._mod_embed(
+            action="🍯 Honeypot Triggered",
+            target=(
+                f"{message.author.mention} — **{message.author.display_name}**\n"
+                f"ID: `{message.author.id}`"
+            ),
             moderator="Auto-mod",
-            reason="Sent a message in the honeypot channel",
+            reason="Sent a message in the designated honeypot channel",
+            color=_COLOR_BAD,
             extra_fields=[
-                ("Message", message.content[:200] or "(empty)"),
-                ("Muted until", "Manual review"),
+                ("Channel", channel_ref),
+                ("Mute Applied", mute_status),
+                ("Message Content", display_content),
+                ("⬆️ To Unmute", unmute_cmd),
             ],
         )
-        await self._post_mod_log(message.guild_id, embed)
+        # Build ping content — fetch configured role if any
+        ping_role_id = self.settings.get(message.guild_id, "honeypot_ping_role_id")
+        ping_content = f"<@&{ping_role_id}>" if ping_role_id else ""
+
+        await self._post_honeypot_log(message.guild_id, mod_log_embed, ping_content)
+        log.info(
+            "Honeypot mod-log posted for user %d in guild %d (mute_applied=%s)",
+            message.author.id, message.guild_id, mute_applied,
+        )
         return True
 
     # ── Auto-mod: banned words ────────────────────────────────────────────────
