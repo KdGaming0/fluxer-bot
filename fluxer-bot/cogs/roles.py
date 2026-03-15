@@ -93,6 +93,7 @@ class RolesCog(fluxer.Cog):
     # =========================================================================
 
     @fluxer.Cog.command(name="reactionrole")
+    @fluxer.checks.has_permission(fluxer.Permissions.MANAGE_ROLES)
     async def reactionrole(self, ctx: fluxer.Message, *, args: str = "") -> None:
         """Dispatcher for all !reactionrole sub-commands."""
         if ctx.guild_id is None:
@@ -101,19 +102,7 @@ class RolesCog(fluxer.Cog):
 
         parts = args.strip().split(None, 3)
         subcommand = parts[0].lower() if parts else ""
-
-        # --- Permission check for all sub-commands ---
         guild = self.bot._guilds.get(ctx.guild_id)
-        member = None
-        if guild:
-            try:
-                member = await guild.fetch_member(ctx.author.id)
-            except Exception:
-                pass
-
-        if not self._has_manage_roles(member):
-            await ctx.reply("You need the **Manage Roles** permission to use this command.")
-            return
 
         if subcommand == "create":
             await self._rr_create(ctx, parts)

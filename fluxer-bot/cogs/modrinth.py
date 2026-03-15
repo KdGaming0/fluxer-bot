@@ -360,24 +360,6 @@ class ModrinthCog(fluxer.Cog):
         return True
 
     # =========================================================================
-    # Permission helpers
-    # =========================================================================
-
-    def _has_manage_guild(self, member) -> bool:
-        if not member:
-            return False
-        perms = getattr(member, "permissions", None)
-        if perms is None:
-            return False
-        return getattr(perms, "manage_guild", False) or getattr(perms, "administrator", False)
-
-    def _is_owner(self, user_id: int) -> bool:
-        owner_id = getattr(config, "OWNER_ID", None)
-        if not owner_id:
-            return False
-        return str(user_id) == str(owner_id)
-
-    # =========================================================================
     # Command dispatcher
     # =========================================================================
 
@@ -392,50 +374,41 @@ class ModrinthCog(fluxer.Cog):
         sub = parts[0].lower() if parts else ""
         rest = parts[1] if len(parts) > 1 else ""
 
-        # Help is public
+        # Help is always public
         if not sub or sub == "help":
             await ctx.reply(embed=self._help_embed())
             return
 
-        # Owner-only gate
+        # Owner-only: bypass the decorator and check manually via OWNER_ID
         if sub == "interval":
-            if not self._is_owner(ctx.author.id):
+            owner_id = getattr(config, "OWNER_ID", None)
+            if not owner_id or str(ctx.author.id) != str(owner_id):
                 await ctx.reply("This command is bot-owner only.")
                 return
             await self._cmd_interval(ctx, rest.split())
             return
 
-        # Everything else requires Manage Guild
-        guild = self.bot._guilds.get(ctx.guild_id)
-        member = None
-        if guild:
-            try:
-                member = await guild.fetch_member(ctx.author.id)
-            except Exception:
-                pass
+        # Everything else goes through the permission decorator on a helper
+        await self._track_gated(ctx, sub, rest)
 
-        if not self._has_manage_guild(member):
-            await ctx.reply("You need the **Manage Guild** permission to use this command.")
-            return
-
-        # Dispatch to sub-command handlers
+    @fluxer.checks.has_permission(fluxer.Permissions.MANAGE_GUILD)
+    async def _track_gated(self, ctx: fluxer.Message, sub: str, rest: str) -> None:
+        """Permission-gated dispatcher — called by track() after owner check."""
         dispatch = {
-            "add":     self._cmd_add,
-            "bulk":    self._cmd_bulk,
-            "remove":  self._cmd_remove,
-            "rm":      self._cmd_remove,
-            "delete":  self._cmd_remove,
-            "list":    self._cmd_list,
-            "check":   self._cmd_check,
-            "set":     self._cmd_set,
+            "add": self._cmd_add,
+            "bulk": self._cmd_bulk,
+            "remove": self._cmd_remove,
+            "rm": self._cmd_remove,
+            "delete": self._cmd_remove,
+            "list": self._cmd_list,
+            "check": self._cmd_check,
+            "set": self._cmd_set,
             "default": self._cmd_default,
         }
-
         handler = dispatch.get(sub)
         if handler is None:
             await ctx.reply(embed=self._help_embed())
             return
-
         await handler(ctx, rest.split())
 
     # =========================================================================
