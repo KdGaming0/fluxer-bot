@@ -31,6 +31,67 @@ class WelcomeCog(fluxer.Cog):
         super().__init__(bot)
         self.settings = GuildSettings()
 
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    async def _get_guild_name(self, guild_id: int) -> str:
+        """Get guild name reliably — cache first, HTTP fallback if name is None.
+
+        Root cause: fluxer populates _guilds from GUILD_CREATE gateway events,
+        but the 'name' field can be None on partial guild objects that arrive
+        alongside message events. Fetching via HTTP always returns the full object.
+        """
+        guild = self.bot._guilds.get(guild_id)
+        if guild and guild.name:
+            return guild.name
+
+        # Cache miss or partial object — fetch full guild from API
+        try:
+            data = await self.bot._http.get_guild(guild_id)
+            if data and data.get("name"):
+                # Update the cache entry with the full object
+                full_guild = fluxer.Guild.from_data(data, self.bot._http)
+                self.bot._guilds[guild_id] = full_guild
+                return full_guild.name
+        except Exception as exc:
+            log.warning("Could not fetch guild %d from API: %s", guild_id, exc)
+
+        return "the server"
+
+    async def _get_member_count(self, guild_id: int) -> int | str:
+        """Get member count — cache first, HTTP fallback."""
+        guild = self.bot._guilds.get(guild_id)
+        if guild and guild.member_count is not None:
+            return guild.member_count
+
+        try:
+            data = await self.bot._http.get_guild(guild_id)
+            if data and data.get("approximate_member_count") is not None:
+                return data["approximate_member_count"]
+            if data and data.get("member_count") is not None:
+                return data["member_count"]
+        except Exception as exc:
+            log.warning("Could not fetch member count for guild %d: %s", guild_id, exc)
+
+        return "?"
+
+    def _format_message(self, template: str, user, guild_name: str, member_count) -> str:
+        """Replace placeholders using fluxer's built-in User properties."""
+        display = user.display_name  # global_name → username
+        mention = user.mention       # <@id>
+        return (
+            template
+            .replace("{user}", mention)
+            .replace("{name}", display)
+            .replace("{server}", str(guild_name))
+            .replace("{count}", str(member_count))
+        )
+
+    def _find_channel_by_name(self, guild_id: int, name: str) -> fluxer.Channel | None:
+        for channel in self.bot._channels.values():
+            if channel.guild_id == guild_id and channel.name == name:
+                return channel
+        return None
+
     # ── Commands ──────────────────────────────────────────────────────────────
 
     @fluxer.Cog.command(name="setwelcome")
@@ -128,12 +189,8 @@ class WelcomeCog(fluxer.Cog):
 
     async def _subcmd_preview(self, ctx: fluxer.Message) -> None:
         """Preview the current welcome message using the caller as the test user."""
-        # Guild name: Guild.name is str | None — fall back safely
-        guild = self.bot._guilds.get(ctx.guild_id)
-        guild_name = str(guild) if guild else "the server"  # Guild.__str__ returns name or "Guild(id)"
-
-        # Member count: Guild has member_count: int | None, NOT a .members list
-        member_count = guild.member_count if guild and guild.member_count is not None else "?"
+        guild_name = await self._get_guild_name(ctx.guild_id)
+        member_count = await self._get_member_count(ctx.guild_id)
 
         template = self.settings.get(ctx.guild_id, "welcome_message") or DEFAULT_MESSAGE
         description = self._format_message(template, ctx.author, guild_name, member_count)
@@ -169,9 +226,8 @@ class WelcomeCog(fluxer.Cog):
             )
             return
 
-        guild = self.bot._guilds.get(guild_id)
-        guild_name = str(guild) if guild else "the server"
-        member_count = guild.member_count if guild and guild.member_count is not None else "?"
+        guild_name = await self._get_guild_name(guild_id)
+        member_count = await self._get_member_count(guild_id)
 
         template = self.settings.get(guild_id, "welcome_message") or DEFAULT_MESSAGE
         description = self._format_message(template, member.user, guild_name, member_count)
@@ -199,25 +255,6 @@ class WelcomeCog(fluxer.Cog):
         log.info(
             "Sent welcome message for %s in guild %s", member.user.username, guild_name
         )
-
-    # ── Helpers ───────────────────────────────────────────────────────────────
-
-    def _format_message(self, template: str, user, guild_name: str, member_count) -> str:
-        display = user.display_name  # User.display_name: global_name → username
-        mention = user.mention       # User.mention: "<@{id}>"
-        return (
-            template
-            .replace("{user}", mention)
-            .replace("{name}", display)
-            .replace("{server}", str(guild_name))
-            .replace("{count}", str(member_count))
-        )
-
-    def _find_channel_by_name(self, guild_id: int, name: str) -> fluxer.Channel | None:
-        for channel in self.bot._channels.values():
-            if channel.guild_id == guild_id and channel.name == name:
-                return channel
-        return None
 
 
 # ── Extension setup ───────────────────────────────────────────────────────────
