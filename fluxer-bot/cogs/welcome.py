@@ -119,31 +119,37 @@ class WelcomeCog(fluxer.Cog):
             await ctx.reply("This command can only be used inside a server.")
             return
 
-        prefix_cmd = f"{config.COMMAND_PREFIX}setwelcomemsg"
-        args = ctx.content.strip()[len(prefix_cmd):].strip()
+        try:
+            prefix_cmd = f"{config.COMMAND_PREFIX}setwelcomemsg"
+            raw = ctx.content.strip()
+            args = raw[len(prefix_cmd):].strip() if raw.lower().startswith(prefix_cmd.lower()) else ""
 
-        if not args:
-            self.settings.delete(ctx.guild_id, "welcome_message")
+            if not args:
+                self.settings.delete(ctx.guild_id, "welcome_message")
+                embed = fluxer.Embed(
+                    title="Welcome message reset",
+                    description=f"The welcome message has been reset to the default:\n\n{DEFAULT_MESSAGE}",
+                    color=config.WELCOME_EMBED_COLOR,
+                )
+                await ctx.reply(embed=embed)
+                return
+
+            self.settings.set(ctx.guild_id, "welcome_message", args)
+            log.info("Welcome message updated in guild %d", ctx.guild_id)
+
             embed = fluxer.Embed(
-                title="Welcome message reset",
-                description=f"The welcome message has been reset to the default:\n\n_{DEFAULT_MESSAGE}_",
+                title="Welcome message updated",
+                description=(
+                    f"New welcome message:\n\n{args}\n\n"
+                    f"Use `{config.COMMAND_PREFIX}welcomepreview` to preview it."
+                ),
                 color=config.WELCOME_EMBED_COLOR,
             )
             await ctx.reply(embed=embed)
-            return
 
-        self.settings.set(ctx.guild_id, "welcome_message", args)
-        log.info("Welcome message updated in guild %d", ctx.guild_id)
-
-        embed = fluxer.Embed(
-            title="Welcome message updated",
-            description=(
-                f"New welcome message:\n\n_{args}_\n\n"
-                f"Use `{config.COMMAND_PREFIX}welcomepreview` to preview it."
-            ),
-            color=config.WELCOME_EMBED_COLOR,
-        )
-        await ctx.reply(embed=embed)
+        except Exception as exc:
+            log.exception("setwelcomemsg failed in guild %d: %s", ctx.guild_id, exc)
+            await ctx.reply(f"Something went wrong saving the welcome message: {exc}")
 
     @fluxer.Cog.command(name="welcomepreview")
     async def welcomepreview(self, ctx: fluxer.Message) -> None:
