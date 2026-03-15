@@ -199,7 +199,7 @@ class RolesCog(fluxer.Cog):
             return
 
         # Resolve the role
-        role = self._find_role(guild, role_query)
+        role = await self._find_role(guild, role_query)
         if role is None:
             await ctx.reply(f"Could not find a role matching **{role_query}**.")
             return
@@ -452,13 +452,27 @@ class RolesCog(fluxer.Cog):
     # Helpers
     # =========================================================================
 
-    def _find_role(self, guild, query: str):
+    async def _find_role(self, guild, query: str):
         """Resolve a role by mention (<@&ID>), raw ID, or name (case-insensitive)."""
         if guild is None:
             return None
 
-        roles = getattr(guild, "roles", [])
+        # Try the in-memory cache first
+        roles = list(getattr(guild, "roles", []) or [])
 
+        # Cache is empty (common on startup) — fetch live from the API
+        if not roles:
+            try:
+                raw_roles = await self.bot._http.get_guild_roles(guild.id)
+                roles = [
+                    fluxer.Role.from_data(r, self.bot._http, guild.id)
+                    for r in (raw_roles or [])
+                ]
+            except Exception as exc:
+                log.warning("Could not fetch guild roles from API: %s", exc)
+                return None
+
+        # Role mention: <@&123456789>
         m = re.fullmatch(r"<@&(\d+)>", query)
         if m:
             role_id = int(m.group(1))
@@ -469,7 +483,7 @@ class RolesCog(fluxer.Cog):
             role_id = int(query)
             return next((r for r in roles if r.id == role_id), None)
 
-        # Plain name fallback (strip @ in case user typed @Name without triggering autocomplete)
+        # Plain name (strip leading @ in case user typed @Name without triggering autocomplete)
         name = query.lstrip("@").strip().lower()
         return next((r for r in roles if r.name.lower() == name), None)
 
