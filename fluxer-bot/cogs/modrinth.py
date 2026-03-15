@@ -583,16 +583,32 @@ class ModrinthCog(fluxer.Cog):
         mc_str = ", ".join(mc_versions) if mc_versions else "Any"
         role_str = " ".join(f"<@&{r}>" for r in roles) or "None"
 
-        lines = [
-            f"✅ Added **{len(added)}** of **{len(project_ids)}** mod(s) to <#{channel_id}>",
-            f"Loader: `{loader_str}` · MC: `{mc_str}` · Roles: {role_str}",
-        ]
-        if added:
-            lines.append("\n" + "\n".join(f"  ✓ {n}" for n in added))
-        if failed:
-            lines.append(f"\n❌ **{len(failed)}** failed:\n" + "\n".join(failed))
+        # Build result embed
+        embed = fluxer.Embed(
+            title=f"✅ Bulk tracking set up — {len(added)} of {len(project_ids)} mod(s) added",
+            color=_COLOR_UPDATE,
+        )
 
-        await ctx.reply("\n".join(lines))
+        embed.add_field(name="Channel", value=f"<#{channel_id}>", inline=True)
+        embed.add_field(name="Loader", value=f"`{loader_str}`", inline=True)
+        embed.add_field(name="MC Version", value=f"`{mc_str}`", inline=True)
+        embed.add_field(name="Ping Role(s)", value=role_str, inline=False)
+
+        if added:
+            embed.add_field(
+                name=f"Added ({len(added)})",
+                value="\n".join(f"✓  {name}" for name in added),
+                inline=False,
+            )
+
+        if failed:
+            embed.add_field(
+                name=f"Failed ({len(failed)})",
+                value="\n".join(failed),
+                inline=False,
+            )
+
+        await ctx.reply(embed=embed)
 
     async def _cmd_remove(self, ctx: fluxer.Message, args: list[str]) -> None:
         """!track remove <id/slug/name>"""
