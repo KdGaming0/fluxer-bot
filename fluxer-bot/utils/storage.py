@@ -37,7 +37,7 @@ from typing import Any
 log = logging.getLogger("utils.storage")
 
 # Path to the data file, relative to the project root
-_DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
+_DATA_DIR = os.path.join(os.path.dirname(__file__), "../..", "data")
 _DATA_FILE = os.path.join(_DATA_DIR, "guild_settings.json")
 
 

@@ -1,0 +1,18 @@
+# Bot runtime data — contains your server config, do not commit
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+
+# Environment / secrets
+.env
+*.env
+
+# IDE
+.idea/
+.vscode/
+*.iml

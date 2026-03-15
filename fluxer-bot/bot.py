@@ -1,5 +1,4 @@
 import asyncio
-import importlib
 import logging
 import os
 import sys
@@ -43,7 +42,6 @@ async def load_cogs() -> None:
     cogs_dir = os.path.join(os.path.dirname(__file__), "cogs")
 
     for filename in sorted(os.listdir(cogs_dir)):
-        # Only load non-private .py files (skip __init__.py and _anything.py)
         if not filename.endswith(".py"):
             continue
         if filename.startswith("_"):
