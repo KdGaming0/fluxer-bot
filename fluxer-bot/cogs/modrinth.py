@@ -635,44 +635,35 @@ class ModrinthCog(fluxer.Cog):
             cid = entry.get("channel_id")
             by_channel.setdefault(cid, []).append((pid, entry))
 
-        embed = fluxer.Embed(
-            title=f"Tracked Mods — {len(tracked)} total",
-            color=_COLOR_INFO,
-        )
+        lines = [f"**Tracked Mods — {len(tracked)} total**\n"]
 
         for channel_id, entries in sorted(by_channel.items(), key=lambda x: x[0]):
-            lines = []
+            lines.append(f"<#{channel_id}> — {len(entries)} mod{'s' if len(entries) != 1 else ''}")
             for pid, entry in sorted(entries, key=lambda x: x[1].get("project_name", "").lower()):
-                loader = entry.get("loader") or "—"
-                mc = ", ".join(entry.get("mc_versions") or []) or "Any"
-                roles = " ".join(f"<@&{r}>" for r in entry.get("roles") or []) or "None"
-                lines.append(
-                    f"**{entry.get('project_name', pid)}** (`{pid}`)\n"
-                    f"  Loader: `{loader}` · MC: `{mc}` · Roles: {roles}"
-                )
-
-            channel_label = f"#{self._channel_name(channel_id)} ({len(entries)} mod{'s' if len(entries) != 1 else ''})"
-            chunks: list[str] = []
-            current = ""
-            for line in lines:
-                candidate = (current + "\n" + line).lstrip("\n") if current else line
-                if len(candidate) > 1024:
-                    chunks.append(current)
-                    current = line
-                else:
-                    current = candidate
-            if current:
-                chunks.append(current)
-
-            for i, chunk in enumerate(chunks):
-                field_name = channel_label if i == 0 else f"{channel_label} (cont. {i + 1})"
-                embed.add_field(name=field_name, value=chunk, inline=False)
+                loader = entry.get("loader") or "any"
+                mc = ", ".join(entry.get("mc_versions") or []) or "any"
+                lines.append(f"  • **{entry.get('project_name', pid)}** · loader: `{loader}` · mc: `{mc}`")
+            lines.append("")
 
         default_loader = data.get("default_loader")
         if default_loader:
-            embed.set_footer(text=f"Server default loader: {default_loader}")
+            lines.append(f"_Server default loader: {default_loader}_")
 
-        await self._reply(ctx, embed=embed)
+        # Split into ≤2000-char messages
+        messages: list[str] = []
+        current = ""
+        for line in lines:
+            candidate = current + line + "\n"
+            if len(candidate) > 1900:
+                messages.append(current)
+                current = line + "\n"
+            else:
+                current = candidate
+        if current:
+            messages.append(current)
+
+        for msg in messages:
+            await ctx.reply(content=msg)
 
     async def _cmd_check(self, ctx: fluxer.Message, args: list[str] = None) -> None:
         await ctx.reply(content="🔍 Running manual update check…")
