@@ -232,12 +232,11 @@ class ModrinthCog(fluxer.Cog):
     # ── Helpers ────────────────────────────────────────────────────────────
 
     @staticmethod
-    async def _reply(ctx: fluxer.Message, text: str = None, embed: fluxer.Embed | None = None) -> None:
+    async def _reply(ctx: fluxer.Message, text: str = "", embed: fluxer.Embed | None = None) -> None:
         if embed is not None:
-            log.debug("Sending embed: %s", embed.to_dict())
-            await ctx.reply(content=text, embed=embed)
+            await ctx.reply(content=text if text else " ", embed=embed)
         else:
-            await ctx.reply(content=text)
+            await ctx.reply(content=text or None)
 
     # ── Lifecycle ──────────────────────────────────────────────────────────
 
