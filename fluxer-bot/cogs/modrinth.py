@@ -680,11 +680,24 @@ class ModrinthCog(fluxer.Cog):
                     f"**{entry.get('project_name', pid)}** (`{pid}`)\n"
                     f"  Loader: `{loader}` · MC: `{mc}` · Roles: {roles}"
                 )
-            embed.add_field(
-                name=f"#{self._channel_name(channel_id)} ({len(entries)} mod{'s' if len(entries) != 1 else ''})",
-                value="\n".join(lines)[:1024],
-                inline=False,
-            )
+
+            # Split into chunks that fit within Discord's 1024-char field limit
+            channel_label = f"#{self._channel_name(channel_id)} ({len(entries)} mod{'s' if len(entries) != 1 else ''})"
+            chunks: list[str] = []
+            current = ""
+            for line in lines:
+                candidate = (current + "\n" + line).lstrip("\n") if current else line
+                if len(candidate) > 1024:
+                    chunks.append(current)
+                    current = line
+                else:
+                    current = candidate
+            if current:
+                chunks.append(current)
+
+            for i, chunk in enumerate(chunks):
+                field_name = channel_label if i == 0 else f"{channel_label} (cont. {i + 1})"
+                embed.add_field(name=field_name, value=chunk, inline=False)
 
         default_loader = data.get("default_loader")
         if default_loader:
