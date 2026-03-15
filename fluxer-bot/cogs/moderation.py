@@ -209,7 +209,7 @@ class ModerationCog(fluxer.Cog):
                     channel = ch
                     break
 
-        if channel is None or not channel.is_text_channel():
+        if channel is None or not channel.is_text_channel:
             await ctx.reply("Could not find that text channel.")
             return
 
@@ -669,7 +669,7 @@ class ModerationCog(fluxer.Cog):
                     channel = ch
                     break
 
-        if channel is None or not channel.is_text_channel():
+        if channel is None or not channel.is_text_channel:
             await ctx.reply("Could not find that text channel.")
             return
 

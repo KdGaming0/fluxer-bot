@@ -468,9 +468,9 @@ class RolesCog(fluxer.Cog):
             role_id = int(query)
             return next((r for r in roles if r.id == role_id), None)
 
-        # Name (case-insensitive)
-        query_lower = query.lower()
-        return next((r for r in roles if r.name.lower() == query_lower), None)
+        # Name (case-insensitive) - strip leading @ if user typed @Role Name
+        name = query.lstrip("@").strip()
+        return next((r for r in roles if r.name.lower() == name.lower()), None)
 
 
 # ── Extension setup ───────────────────────────────────────────────────────────
