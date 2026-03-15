@@ -61,7 +61,7 @@ class WelcomeCog(fluxer.Cog):
             )
             return
 
-        if not channel.is_text_channel():
+        if not channel.is_text_channel:
             await ctx.reply("The welcome channel must be a text channel.")
             return
 
