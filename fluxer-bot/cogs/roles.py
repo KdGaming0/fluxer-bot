@@ -258,7 +258,7 @@ class RolesCog(fluxer.Cog):
         if channel:
             try:
                 message = await channel.fetch_message(int(msg_id_str))
-                await message.edit(embeds=[self._build_embed(entry["title"], pairs)])  # fix: embeds=[...]
+                await message.edit(embeds=[self._build_embed(entry["title"], pairs).to_dict()])
                 await message.add_reaction(emoji)
             except Exception as exc:
                 log.warning("Failed to update reaction-role embed: %s", exc)
@@ -363,7 +363,7 @@ class RolesCog(fluxer.Cog):
         if channel:
             try:
                 message = await channel.fetch_message(int(msg_id_str))
-                await message.edit(embeds=[self._build_embed(entry["title"], pairs)])  # fix: embeds=[...]
+                await message.edit(embeds=[self._build_embed(entry["title"], pairs).to_dict()])
                 await message.clear_reaction(emoji)
             except Exception as exc:
                 log.warning("Failed to update reaction-role embed: %s", exc)
