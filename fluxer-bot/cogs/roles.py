@@ -66,13 +66,28 @@ class RolesCog(fluxer.Cog):
             return True
         try:
             bot_member = await guild.fetch_member(self.bot.user.id)
-        except Exception:
+            # fetch_member gives role IDs, not Role objects — get full role list
+            raw_roles = await self.bot._http.get_guild_roles(guild.id)
+            all_roles = {
+                r["id"]: r.get("position", 0)
+                for r in (raw_roles or [])
+            }
+
+            # bot_member.roles is a list of role IDs (ints or strings)
+            bot_role_ids = {
+                int(r) if not hasattr(r, "id") else r.id
+                for r in getattr(bot_member, "roles", [])
+            }
+
+            bot_top = max(
+                (all_roles.get(str(rid), 0) for rid in bot_role_ids),
+                default=0,
+            )
+            return role.position < bot_top
+
+        except Exception as exc:
+            log.warning("Could not verify bot role hierarchy: %s", exc)
             return True  # Can't verify; attempt anyway
-        bot_top = max(
-            (r.position for r in getattr(bot_member, "roles", []) if hasattr(r, "position")),
-            default=0,
-        )
-        return role.position < bot_top
 
     # =========================================================================
     # Embed builder
