@@ -22,3 +22,10 @@ BANNED_WORDS: list[str] = [
 # ── Utility cog (used later) ──────────────────────────────────────────────────
 # Maximum reminder duration in seconds a user can request (default: 24 h).
 MAX_REMINDER_SECONDS: int = int(os.environ.get("MAX_REMINDER_SECONDS", 86400))
+
+# ── Modrinth cog ──────────────────────────────────────────────────────────────
+# Your Fluxer user ID — only this user can run !track interval.
+OWNER_ID: str = os.environ.get("OWNER_ID", "")
+
+# How often (in seconds) to poll Modrinth for new mod versions. Minimum 60.
+MODRINTH_CHECK_INTERVAL: int = int(os.environ.get("MODRINTH_CHECK_INTERVAL", 300))
