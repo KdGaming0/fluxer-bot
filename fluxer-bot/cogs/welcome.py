@@ -6,7 +6,14 @@ Greets new members with a rich embed.
 Setup (run once after adding the bot to your server):
     !setwelcome #your-channel-name
 
-The channel is saved to data/guild_settings.json and survives restarts.
+Commands:
+    !setwelcome #channel     - Set the welcome channel
+    !setwelcome              - Clear the welcome channel
+    !setwelcomemsg <message> - Set a custom welcome message
+                               Use {user} for mention, {name} for display name,
+                               {server} for server name, {count} for member count
+    !setwelcomemsg           - Reset to default message
+    !welcomepreview          - Preview the current welcome message
 """
 
 import logging
@@ -17,6 +24,8 @@ import config
 from utils.storage import GuildSettings
 
 log = logging.getLogger("cog.welcome")
+
+DEFAULT_MESSAGE = "Hey **{name}**, welcome to **{server}**!\nWe're glad to have you here. Feel free to introduce yourself."
 
 
 class WelcomeCog(fluxer.Cog):
@@ -41,12 +50,10 @@ class WelcomeCog(fluxer.Cog):
         args = ctx.content.removeprefix(f"{config.COMMAND_PREFIX}setwelcome").strip()
 
         if not args:
-            # No argument — clear the current setting
             self.settings.delete(ctx.guild_id, "welcome_channel_id")
             await ctx.reply("Welcome channel cleared. No welcome messages will be sent.")
             return
 
-        # Try to parse a <#ID> channel mention first, then fall back to name
         channel = None
         match = re.search(r"<#(\d+)>", args)
         if match:
@@ -76,10 +83,76 @@ class WelcomeCog(fluxer.Cog):
             description=(
                 f"New members will be welcomed in **#{channel.name}**.\n\n"
                 f"To change it: `{config.COMMAND_PREFIX}setwelcome #other-channel`\n"
-                f"To disable it: `{config.COMMAND_PREFIX}setwelcome` with no argument."
+                f"To disable it: `{config.COMMAND_PREFIX}setwelcome` with no argument.\n\n"
+                f"To customize the message: `{config.COMMAND_PREFIX}setwelcomemsg <message>`\n"
+                f"Available placeholders: `{{user}}` `{{name}}` `{{server}}` `{{count}}`"
             ),
             color=config.WELCOME_EMBED_COLOR,
         )
+        await ctx.reply(embed=embed)
+
+    @fluxer.Cog.command(name="setwelcomemsg")
+    async def setwelcomemsg(self, ctx: fluxer.Message) -> None:
+        """Set a custom welcome message.
+
+        Usage:  !setwelcomemsg Hey {user}, welcome to {server}! You are member #{count}.
+                !setwelcomemsg       <- resets to default message
+
+        Placeholders:
+            {user}   - Mentions the user e.g. @John
+            {name}   - Display name of the user
+            {server} - Server name
+            {count}  - Current member count
+        """
+        if ctx.guild_id is None:
+            await ctx.reply("This command can only be used inside a server.")
+            return
+
+        args = ctx.content.removeprefix(f"{config.COMMAND_PREFIX}setwelcomemsg").strip()
+
+        if not args:
+            self.settings.delete(ctx.guild_id, "welcome_message")
+            embed = fluxer.Embed(
+                title="Welcome message reset",
+                description=f"The welcome message has been reset to the default:\n\n_{DEFAULT_MESSAGE}_",
+                color=config.WELCOME_EMBED_COLOR,
+            )
+            await ctx.reply(embed=embed)
+            return
+
+        self.settings.set(ctx.guild_id, "welcome_message", args)
+        log.info("Welcome message updated in guild %d", ctx.guild_id)
+
+        embed = fluxer.Embed(
+            title="Welcome message updated",
+            description=(
+                f"New welcome message:\n\n_{args}_\n\n"
+                f"Use `{config.COMMAND_PREFIX}welcomepreview` to preview it."
+            ),
+            color=config.WELCOME_EMBED_COLOR,
+        )
+        await ctx.reply(embed=embed)
+
+    @fluxer.Cog.command(name="welcomepreview")
+    async def welcomepreview(self, ctx: fluxer.Message) -> None:
+        """Preview the current welcome message using yourself as the test user."""
+        if ctx.guild_id is None:
+            await ctx.reply("This command can only be used inside a server.")
+            return
+
+        guild = self.bot._guilds.get(ctx.guild_id)
+        guild_name = guild.name if guild else "the server"
+        member_count = len(guild.members) if guild and hasattr(guild, "members") else "?"
+
+        template = self.settings.get(ctx.guild_id, "welcome_message") or DEFAULT_MESSAGE
+        description = self._format_message(template, ctx.author, guild_name, member_count)
+
+        embed = fluxer.Embed(
+            title="👋 Welcome message preview",
+            description=description,
+            color=config.WELCOME_EMBED_COLOR,
+        )
+        embed.set_footer(text="This is a preview using your account.")
         await ctx.reply(embed=embed)
 
     # ── Listeners ─────────────────────────────────────────────────────────────
@@ -107,15 +180,16 @@ class WelcomeCog(fluxer.Cog):
 
         guild = self.bot._guilds.get(guild_id)
         guild_name = guild.name if guild else "the server"
+        member_count = len(guild.members) if guild and hasattr(guild, "members") else "?"
         display = member.nick or member.user.global_name or member.user.username
+
+        template = self.settings.get(guild_id, "welcome_message") or DEFAULT_MESSAGE
+        description = self._format_message(template, member.user, guild_name, member_count)
 
         embed = (
             fluxer.Embed(
                 title="Welcome!",
-                description=(
-                    f"Hey **{display}**, welcome to **{guild_name}**!\n"
-                    "We're glad to have you here. Feel free to introduce yourself."
-                ),
+                description=description,
                 color=config.WELCOME_EMBED_COLOR,
             )
             .add_field(
@@ -137,6 +211,18 @@ class WelcomeCog(fluxer.Cog):
         )
 
     # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _format_message(self, template: str, user, guild_name: str, member_count) -> str:
+        """Replace placeholders in the welcome message template."""
+        display = getattr(user, "global_name", None) or getattr(user, "username", str(user))
+        mention = f"<@{user.id}>" if hasattr(user, "id") else display
+        return (
+            template
+            .replace("{user}", mention)
+            .replace("{name}", display)
+            .replace("{server}", guild_name)
+            .replace("{count}", str(member_count))
+        )
 
     def _find_channel_by_name(self, guild_id: int, name: str) -> fluxer.Channel | None:
         """Find a cached channel by name within a specific guild."""
