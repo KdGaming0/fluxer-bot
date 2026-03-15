@@ -240,21 +240,32 @@ class RolesCog(fluxer.Cog):
             )
             return
 
-        # Add the pair and update the embed
+        # Add the pair and persist
         pairs[emoji] = role.id
         entry["pairs"] = pairs
         rr_data[msg_id_str] = entry
         self.settings.set(ctx.guild_id, "reaction_roles", rr_data)
 
-        # Edit the live embed
+        # Resolve channel — try cache first, then fetch from API
         channel = self.bot._channels.get(entry["channel_id"])
+        if channel is None:
+            try:
+                channel_data = await self.bot._http.get_channel(entry["channel_id"])
+                channel = fluxer.Channel.from_data(channel_data, self.bot._http)
+            except Exception as exc:
+                log.warning("Could not resolve channel %d: %s", entry["channel_id"], exc)
+
         if channel:
             try:
                 message = await channel.fetch_message(int(msg_id_str))
-                await message.edit(embed=self._build_embed(entry["title"], pairs))
+                await message.edit(embeds=[self._build_embed(entry["title"], pairs)])  # fix: embeds=[...]
                 await message.add_reaction(emoji)
             except Exception as exc:
                 log.warning("Failed to update reaction-role embed: %s", exc)
+                await ctx.reply(
+                    f"⚠️ Role was saved but I couldn't update the embed: `{exc}`"
+                )
+                return
 
         log.info(
             "Added %s → role %d to reaction-role msg %s in guild %d",
@@ -265,60 +276,6 @@ class RolesCog(fluxer.Cog):
             embed=fluxer.Embed(
                 title="Role added",
                 description=f"{emoji} is now mapped to **{role.name}**.",
-                color=_COLOR,
-            )
-        )
-
-    async def _rr_remove(self, ctx: fluxer.Message, parts: list[str]) -> None:
-        """Remove an emoji→role pair from a reaction-role message.
-
-        Usage: !reactionrole remove <message_id> <emoji>
-        """
-        if len(parts) < 3:
-            await ctx.reply(
-                f"Usage: `{config.COMMAND_PREFIX}reactionrole remove <message_id> <emoji>`"
-            )
-            return
-
-        msg_id_str = parts[1]
-        emoji = parts[2]
-
-        rr_data: dict = self.settings.get(ctx.guild_id, "reaction_roles") or {}
-        if msg_id_str not in rr_data:
-            await ctx.reply(f"No reaction-role embed found with ID `{msg_id_str}`.")
-            return
-
-        entry = rr_data[msg_id_str]
-        pairs: dict = entry.get("pairs", {})
-
-        if emoji not in pairs:
-            await ctx.reply(f"{emoji} is not mapped on that embed.")
-            return
-
-        del pairs[emoji]
-        entry["pairs"] = pairs
-        rr_data[msg_id_str] = entry
-        self.settings.set(ctx.guild_id, "reaction_roles", rr_data)
-
-        # Update the live embed and remove the bot's reaction
-        channel = self.bot._channels.get(entry["channel_id"])
-        if channel:
-            try:
-                message = await channel.fetch_message(int(msg_id_str))
-                await message.edit(embed=self._build_embed(entry["title"], pairs))
-                await message.clear_reaction(emoji)
-            except Exception as exc:
-                log.warning("Failed to update reaction-role embed: %s", exc)
-
-        log.info(
-            "Removed %s from reaction-role msg %s in guild %d",
-            emoji, msg_id_str, ctx.guild_id,
-        )
-
-        await ctx.reply(
-            embed=fluxer.Embed(
-                title="Role removed",
-                description=f"{emoji} has been removed from the embed.",
                 color=_COLOR,
             )
         )
@@ -359,6 +316,71 @@ class RolesCog(fluxer.Cog):
             embed=fluxer.Embed(
                 title="Embed deleted",
                 description=f"Reaction-role embed `{msg_id_str}` and all its mappings have been removed.",
+                color=_COLOR,
+            )
+        )
+
+    async def _rr_remove(self, ctx: fluxer.Message, parts: list[str]) -> None:
+        """Remove an emoji→role pair from a reaction-role message.
+
+        Usage: !reactionrole remove <message_id> <emoji>
+        """
+        if len(parts) < 3:
+            await ctx.reply(
+                f"Usage: `{config.COMMAND_PREFIX}reactionrole remove <message_id> <emoji>`"
+            )
+            return
+
+        msg_id_str = parts[1]
+        emoji = parts[2]
+
+        rr_data: dict = self.settings.get(ctx.guild_id, "reaction_roles") or {}
+        if msg_id_str not in rr_data:
+            await ctx.reply(f"No reaction-role embed found with ID `{msg_id_str}`.")
+            return
+
+        entry = rr_data[msg_id_str]
+        pairs: dict = entry.get("pairs", {})
+
+        if emoji not in pairs:
+            await ctx.reply(f"{emoji} is not mapped on that embed.")
+            return
+
+        del pairs[emoji]
+        entry["pairs"] = pairs
+        rr_data[msg_id_str] = entry
+        self.settings.set(ctx.guild_id, "reaction_roles", rr_data)
+
+        # Resolve channel — try cache first, then fetch from API
+        channel = self.bot._channels.get(entry["channel_id"])
+        if channel is None:
+            try:
+                channel_data = await self.bot._http.get_channel(entry["channel_id"])
+                channel = fluxer.Channel.from_data(channel_data, self.bot._http)
+            except Exception as exc:
+                log.warning("Could not resolve channel %d: %s", entry["channel_id"], exc)
+
+        if channel:
+            try:
+                message = await channel.fetch_message(int(msg_id_str))
+                await message.edit(embeds=[self._build_embed(entry["title"], pairs)])  # fix: embeds=[...]
+                await message.clear_reaction(emoji)
+            except Exception as exc:
+                log.warning("Failed to update reaction-role embed: %s", exc)
+                await ctx.reply(
+                    f"⚠️ Role was removed from storage but I couldn't update the embed: `{exc}`"
+                )
+                return
+
+        log.info(
+            "Removed %s from reaction-role msg %s in guild %d",
+            emoji, msg_id_str, ctx.guild_id,
+        )
+
+        await ctx.reply(
+            embed=fluxer.Embed(
+                title="Role removed",
+                description=f"{emoji} has been removed from the embed.",
                 color=_COLOR,
             )
         )
