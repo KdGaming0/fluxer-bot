@@ -175,7 +175,6 @@ def _build_update_embed(project: dict, version: dict) -> fluxer.Embed:
     else:
         mc_str = ", ".join(mc) or "—"
 
-    # Trim changelog to fit embed limits
     changelog = (version.get("changelog") or "").strip()
     if len(changelog) > 900:
         changelog = changelog[:900] + f"…\n\n[View full changelog]({url})"
@@ -230,13 +229,29 @@ class ModrinthCog(fluxer.Cog):
         self._session: aiohttp.ClientSession | None = None
         self._task: asyncio.Task | None = None
 
+    # ── Helpers ────────────────────────────────────────────────────────────
+
+    @staticmethod
+    async def _reply(ctx: fluxer.Message, text: str = "", embed: fluxer.Embed | None = None) -> None:
+        """
+        Wrapper around ctx.reply() that ensures content is never None/empty.
+
+        Root cause: fluxer's send_message HTTP call rejects requests where
+        content is None or omitted entirely when an embed is present — it
+        requires content to be at least an empty string in the JSON payload.
+        """
+        if embed is not None:
+            await ctx.reply(content=text, embed=embed)
+        else:
+            await ctx.reply(content=text)
+
     # ── Lifecycle ──────────────────────────────────────────────────────────
 
     @fluxer.Cog.listener()
     async def on_ready(self) -> None:
         """Start the background polling loop once the bot is connected."""
         if self._task and not self._task.done():
-            return  # Already running
+            return
         self._session = aiohttp.ClientSession()
         self._task = asyncio.create_task(self._poll_loop())
         log.info(
@@ -259,7 +274,6 @@ class ModrinthCog(fluxer.Cog):
     # ── Background polling loop ────────────────────────────────────────────
 
     async def _poll_loop(self) -> None:
-        """Periodically check every tracked mod across all guilds."""
         while True:
             interval = max(
                 _MIN_INTERVAL,
@@ -272,7 +286,6 @@ class ModrinthCog(fluxer.Cog):
                 log.exception("Unhandled error in Modrinth poll loop: %s", exc)
 
     async def _check_all_guilds(self) -> None:
-        """Run one full update check pass across every guild the bot is in."""
         for guild in self.bot.guilds:
             try:
                 await self._check_guild(guild.id)
@@ -280,7 +293,6 @@ class ModrinthCog(fluxer.Cog):
                 log.warning("Error checking guild %d: %s", guild.id, exc)
 
     async def _check_guild(self, guild_id: int) -> None:
-        """Check all tracked mods for a single guild and post any new versions."""
         data = self.settings.get(guild_id, "modrinth") or {}
         tracked: dict = data.get("tracked", {})
         if not tracked:
@@ -295,7 +307,6 @@ class ModrinthCog(fluxer.Cog):
                     self.settings.set(guild_id, "modrinth", data)
             except Exception as exc:
                 log.warning("Error checking project %s in guild %d: %s", project_id, guild_id, exc)
-
             await asyncio.sleep(1)
 
     async def _check_project(
@@ -305,11 +316,6 @@ class ModrinthCog(fluxer.Cog):
         entry: dict,
         default_loader: str | None,
     ) -> bool:
-        """
-        Check one project for a new version.
-        Posts to the configured channel if a new version is found.
-        Returns True if a new version was found (and last_version_id was updated).
-        """
         loader = entry.get("loader") or default_loader
         versions = await _get_versions(
             self._session,
@@ -339,15 +345,13 @@ class ModrinthCog(fluxer.Cog):
                 "Notification channel %d not found for project %s in guild %d",
                 entry["channel_id"], project_id, guild_id,
             )
-            return True  # Mark as seen to avoid spam on reconnect
+            return True
 
         embed = _build_update_embed(project, latest)
-
         role_mentions = " ".join(f"<@&{rid}>" for rid in entry.get("roles") or [])
-        if role_mentions:
-            await channel.send(content=role_mentions, embed=embed)
-        else:
-            await channel.send(embed=embed)
+
+        # Always pass content as a string, never None
+        await channel.send(content=role_mentions, embed=embed)
 
         log.info(
             "Posted update for %s (%s) in guild %d",
@@ -363,7 +367,7 @@ class ModrinthCog(fluxer.Cog):
     async def track(self, ctx: fluxer.Message, *, args: str = "") -> None:
         """Dispatcher for all !track sub-commands."""
         if ctx.guild_id is None:
-            await ctx.reply("This command can only be used inside a server.")
+            await ctx.reply(content="This command can only be used inside a server.")
             return
 
         parts = args.strip().split(None, 1)
@@ -371,13 +375,13 @@ class ModrinthCog(fluxer.Cog):
         rest = parts[1] if len(parts) > 1 else ""
 
         if not sub or sub == "help":
-            await ctx.reply(embed=self._help_embed())
+            await self._reply(ctx, embed=self._help_embed())
             return
 
         if sub == "interval":
             owner_id = getattr(config, "OWNER_ID", None)
             if not owner_id or str(ctx.author.id) != str(owner_id):
-                await ctx.reply("This command is bot-owner only.")
+                await ctx.reply(content="This command is bot-owner only.")
                 return
             await self._cmd_interval(ctx, rest.split())
             return
@@ -386,21 +390,20 @@ class ModrinthCog(fluxer.Cog):
 
     @fluxer.checks.has_permission(fluxer.Permissions.MANAGE_GUILD)
     async def _track_gated(self, ctx: fluxer.Message, sub: str, rest: str) -> None:
-        """Permission-gated dispatcher — called by track() after owner check."""
         dispatch = {
-            "add":    self._cmd_add,
-            "bulk":   self._cmd_bulk,
-            "remove": self._cmd_remove,
-            "rm":     self._cmd_remove,
-            "delete": self._cmd_remove,
-            "list":   self._cmd_list,
-            "check":  self._cmd_check,
-            "set":    self._cmd_set,
-            "default":self._cmd_default,
+            "add":     self._cmd_add,
+            "bulk":    self._cmd_bulk,
+            "remove":  self._cmd_remove,
+            "rm":      self._cmd_remove,
+            "delete":  self._cmd_remove,
+            "list":    self._cmd_list,
+            "check":   self._cmd_check,
+            "set":     self._cmd_set,
+            "default": self._cmd_default,
         }
         handler = dispatch.get(sub)
         if handler is None:
-            await ctx.reply(embed=self._help_embed())
+            await self._reply(ctx, embed=self._help_embed())
             return
         await handler(ctx, rest.split())
 
@@ -409,34 +412,33 @@ class ModrinthCog(fluxer.Cog):
     # =========================================================================
 
     async def _cmd_add(self, ctx: fluxer.Message, args: list[str]) -> None:
-        """!track add <id> <#channel> [@role...] [--mc ver] [--loader loader]"""
         if len(args) < 2:
-            await ctx.reply(
+            await ctx.reply(content=(
                 f"Usage: `{config.COMMAND_PREFIX}track add <id> <#channel> [@role...] "
                 f"[--mc 1.21.4] [--loader fabric]`"
-            )
+            ))
             return
 
         project_id = args[0]
         channel_id = _parse_channel(args[1])
         if not channel_id:
-            await ctx.reply("Please mention a valid channel: `#channel-name`")
+            await ctx.reply(content="Please mention a valid channel: `#channel-name`")
             return
 
         roles, mc_versions, loader = _parse_add_opts(args[2:])
 
         if loader and loader not in _VALID_LOADERS:
-            await ctx.reply(
+            await ctx.reply(content=(
                 f"`{loader}` is not a valid loader. "
                 f"Valid options: {', '.join(sorted(_VALID_LOADERS))}"
-            )
+            ))
             return
 
-        await ctx.reply(f"🔍 Looking up `{project_id}` on Modrinth…")
+        await ctx.reply(content=f"🔍 Looking up `{project_id}` on Modrinth…")
 
         project = await _get_project(self._session, project_id)
         if not project:
-            await ctx.reply(f"Could not find a Modrinth project with ID/slug `{project_id}`.")
+            await ctx.reply(content=f"Could not find a Modrinth project with ID/slug `{project_id}`.")
             return
 
         data = self.settings.get(ctx.guild_id, "modrinth") or {}
@@ -465,11 +467,6 @@ class ModrinthCog(fluxer.Cog):
         data["tracked"][project["id"]] = entry
         self.settings.set(ctx.guild_id, "modrinth", data)
 
-        log.info(
-            "Now tracking %s (%s) in guild %d → channel %d",
-            project.get("title"), project["id"], ctx.guild_id, channel_id,
-        )
-
         role_str = " ".join(f"<@&{r}>" for r in roles) or "None"
         embed = (
             fluxer.Embed(
@@ -485,18 +482,17 @@ class ModrinthCog(fluxer.Cog):
         if project.get("icon_url"):
             embed.set_thumbnail(url=project["icon_url"])
 
-        await ctx.reply(embed=embed)
+        await self._reply(ctx, embed=embed)
 
     async def _cmd_bulk(self, ctx: fluxer.Message, args: list[str]) -> None:
-        """!track bulk <#channel> [@role...] [--loader x] [--mc x] -- <id1> <id2> ..."""
         full = " ".join(args)
         sep = " -- "
         if sep not in full:
-            await ctx.reply(
+            await ctx.reply(content=(
                 f"Usage: `{config.COMMAND_PREFIX}track bulk <#channel> [@role...] "
                 f"[--loader fabric] [--mc 1.21.4] -- <id1> <id2> …`\n"
                 f"Separate options from IDs with ` -- ` (space dash dash space)."
-            )
+            ))
             return
 
         opts_part, ids_part = full.split(sep, 1)
@@ -504,28 +500,27 @@ class ModrinthCog(fluxer.Cog):
         project_ids = ids_part.strip().split()
 
         if not project_ids:
-            await ctx.reply("No project IDs provided after ` -- `.")
+            await ctx.reply(content="No project IDs provided after ` -- `.")
             return
-
         if not opts_args:
-            await ctx.reply("Please provide a channel as the first argument.")
+            await ctx.reply(content="Please provide a channel as the first argument.")
             return
 
         channel_id = _parse_channel(opts_args[0])
         if not channel_id:
-            await ctx.reply("Please mention a valid channel as the first argument.")
+            await ctx.reply(content="Please mention a valid channel as the first argument.")
             return
 
         roles, mc_versions, loader = _parse_add_opts(opts_args[1:])
 
         if loader and loader not in _VALID_LOADERS:
-            await ctx.reply(
+            await ctx.reply(content=(
                 f"`{loader}` is not a valid loader. "
                 f"Valid options: {', '.join(sorted(_VALID_LOADERS))}"
-            )
+            ))
             return
 
-        await ctx.reply(f"🔍 Adding **{len(project_ids)}** mod(s) — this may take a moment…")
+        await ctx.reply(content=f"🔍 Adding **{len(project_ids)}** mod(s) — this may take a moment…")
 
         data = self.settings.get(ctx.guild_id, "modrinth") or {}
         default_loader = data.get("default_loader")
@@ -597,12 +592,11 @@ class ModrinthCog(fluxer.Cog):
                 inline=False,
             )
 
-        await ctx.reply(embed=embed)
+        await self._reply(ctx, embed=embed)
 
     async def _cmd_remove(self, ctx: fluxer.Message, args: list[str]) -> None:
-        """!track remove <id/slug/name>"""
         if not args:
-            await ctx.reply(f"Usage: `{config.COMMAND_PREFIX}track remove <project_id>`")
+            await ctx.reply(content=f"Usage: `{config.COMMAND_PREFIX}track remove <project_id>`")
             return
 
         query = args[0].lower()
@@ -616,10 +610,10 @@ class ModrinthCog(fluxer.Cog):
                 break
 
         if not match_key:
-            await ctx.reply(
+            await ctx.reply(content=(
                 f"No tracked mod matching `{args[0]}`.\n"
                 f"Use `{config.COMMAND_PREFIX}track list` to see what's being tracked."
-            )
+            ))
             return
 
         name = tracked[match_key].get("project_name", match_key)
@@ -627,24 +621,20 @@ class ModrinthCog(fluxer.Cog):
         data["tracked"] = tracked
         self.settings.set(ctx.guild_id, "modrinth", data)
 
-        log.info("Stopped tracking %s in guild %d", name, ctx.guild_id)
-        await ctx.reply(
-            embed=fluxer.Embed(
-                description=f"Stopped tracking **{name}**.",
-                color=_COLOR_INFO,
-            )
-        )
+        await self._reply(ctx, embed=fluxer.Embed(
+            description=f"Stopped tracking **{name}**.",
+            color=_COLOR_INFO,
+        ))
 
     async def _cmd_list(self, ctx: fluxer.Message, args: list[str] = None) -> None:
-        """!track list — show all tracked mods in this server."""
         data = self.settings.get(ctx.guild_id, "modrinth") or {}
         tracked: dict = data.get("tracked", {})
 
         if not tracked:
-            await ctx.reply(
+            await ctx.reply(content=(
                 f"No mods are being tracked yet.\n"
                 f"Use `{config.COMMAND_PREFIX}track add` to start tracking."
-            )
+            ))
             return
 
         by_channel: dict[int, list[tuple]] = {}
@@ -689,74 +679,62 @@ class ModrinthCog(fluxer.Cog):
         if default_loader:
             embed.set_footer(text=f"Server default loader: {default_loader}")
 
-        await ctx.reply(embed=embed)
+        await self._reply(ctx, embed=embed)
 
     async def _cmd_check(self, ctx: fluxer.Message, args: list[str] = None) -> None:
-        """!track check — manually trigger an update check for this guild."""
-        await ctx.reply("🔍 Running manual update check…")
+        await ctx.reply(content="🔍 Running manual update check…")
         try:
             await self._check_guild(ctx.guild_id)
-            await ctx.reply(
-                embed=fluxer.Embed(
-                    description="Manual check complete. Any new versions have been posted.",
-                    color=_COLOR_INFO,
-                )
-            )
+            await self._reply(ctx, embed=fluxer.Embed(
+                description="Manual check complete. Any new versions have been posted.",
+                color=_COLOR_INFO,
+            ))
         except Exception as exc:
             log.exception("Manual check failed in guild %d: %s", ctx.guild_id, exc)
-            await ctx.reply(f"Check failed: {exc}")
+            await ctx.reply(content=f"Check failed: {exc}")
 
     async def _cmd_interval(self, ctx: fluxer.Message, args: list[str]) -> None:
-        """!track interval <seconds> — bot owner only."""
         if not args or not args[0].isdigit():
-            await ctx.reply(f"Usage: `{config.COMMAND_PREFIX}track interval <seconds>` (minimum {_MIN_INTERVAL})")
+            await ctx.reply(content=f"Usage: `{config.COMMAND_PREFIX}track interval <seconds>` (minimum {_MIN_INTERVAL})")
             return
 
         seconds = int(args[0])
         if seconds < _MIN_INTERVAL:
-            await ctx.reply(f"Interval must be at least **{_MIN_INTERVAL}** seconds.")
+            await ctx.reply(content=f"Interval must be at least **{_MIN_INTERVAL}** seconds.")
             return
 
         config.MODRINTH_CHECK_INTERVAL = seconds
-        await ctx.reply(
-            embed=fluxer.Embed(
-                description=f"Check interval updated to **{seconds}s**. Takes effect from the next tick.",
-                color=_COLOR_INFO,
-            )
-        )
+        await self._reply(ctx, embed=fluxer.Embed(
+            description=f"Check interval updated to **{seconds}s**. Takes effect from the next tick.",
+            color=_COLOR_INFO,
+        ))
 
     async def _cmd_default(self, ctx: fluxer.Message, args: list[str]) -> None:
-        """!track default loader [loader] — set/clear the server-wide default loader."""
         if not args or args[0].lower() != "loader":
-            await ctx.reply(f"Usage: `{config.COMMAND_PREFIX}track default loader [loader]`")
+            await ctx.reply(content=f"Usage: `{config.COMMAND_PREFIX}track default loader [loader]`")
             return
 
         loader = args[1].lower() if len(args) > 1 else None
 
         if loader and loader not in _VALID_LOADERS:
-            await ctx.reply(
+            await ctx.reply(content=(
                 f"`{loader}` is not a valid loader. "
                 f"Valid options: {', '.join(sorted(_VALID_LOADERS))}"
-            )
+            ))
             return
 
         data = self.settings.get(ctx.guild_id, "modrinth") or {}
         data["default_loader"] = loader
         self.settings.set(ctx.guild_id, "modrinth", data)
 
-        msg = (
-            f"Server default loader set to `{loader}`."
-            if loader
-            else "Server default loader cleared."
-        )
-        await ctx.reply(embed=fluxer.Embed(description=msg, color=_COLOR_INFO))
+        msg = f"Server default loader set to `{loader}`." if loader else "Server default loader cleared."
+        await self._reply(ctx, embed=fluxer.Embed(description=msg, color=_COLOR_INFO))
 
     # ── !track set <key> ... ──────────────────────────────────────────────
 
     async def _cmd_set(self, ctx: fluxer.Message, args: list[str]) -> None:
-        """Dispatcher for all !track set sub-commands."""
         if not args:
-            await ctx.reply(embed=self._help_embed())
+            await self._reply(ctx, embed=self._help_embed())
             return
 
         key = args[0].lower()
@@ -777,80 +755,86 @@ class ModrinthCog(fluxer.Cog):
 
         handler = set_dispatch.get(key)
         if handler is None:
-            await ctx.reply(embed=self._help_embed())
+            await self._reply(ctx, embed=self._help_embed())
             return
 
         await handler(ctx, rest)
 
     async def _set_channel(self, ctx: fluxer.Message, args: list[str]) -> None:
         if len(args) < 2:
-            await ctx.reply(f"Usage: `{config.COMMAND_PREFIX}track set channel <id> <#channel>`")
+            await ctx.reply(content=f"Usage: `{config.COMMAND_PREFIX}track set channel <id> <#channel>`")
             return
         pid, channel_arg = args[0], args[1]
         channel_id = _parse_channel(channel_arg)
         if not channel_id:
-            await ctx.reply("Please mention a valid channel.")
+            await ctx.reply(content="Please mention a valid channel.")
             return
         data, entry = self._get_entry(ctx.guild_id, pid)
         if entry is None:
-            await ctx.reply(f"`{pid}` is not being tracked.")
+            await ctx.reply(content=f"`{pid}` is not being tracked.")
             return
         entry["channel_id"] = channel_id
         self.settings.set(ctx.guild_id, "modrinth", data)
-        await ctx.reply(embed=fluxer.Embed(description=f"Notifications for `{pid}` will now go to <#{channel_id}>.", color=_COLOR_INFO))
+        await self._reply(ctx, embed=fluxer.Embed(
+            description=f"Notifications for `{pid}` will now go to <#{channel_id}>.",
+            color=_COLOR_INFO,
+        ))
 
     async def _set_mc(self, ctx: fluxer.Message, args: list[str]) -> None:
         if not args:
-            await ctx.reply(f"Usage: `{config.COMMAND_PREFIX}track set mc <id> [versions...]`")
+            await ctx.reply(content=f"Usage: `{config.COMMAND_PREFIX}track set mc <id> [versions...]`")
             return
         pid, versions = args[0], args[1:]
         data, entry = self._get_entry(ctx.guild_id, pid)
         if entry is None:
-            await ctx.reply(f"`{pid}` is not being tracked.")
+            await ctx.reply(content=f"`{pid}` is not being tracked.")
             return
         entry["mc_versions"] = versions
         self.settings.set(ctx.guild_id, "modrinth", data)
         msg = f"MC filter for `{pid}`: `{', '.join(versions)}`" if versions else f"MC filter for `{pid}` cleared."
-        await ctx.reply(embed=fluxer.Embed(description=msg, color=_COLOR_INFO))
+        await self._reply(ctx, embed=fluxer.Embed(description=msg, color=_COLOR_INFO))
 
     async def _set_loader(self, ctx: fluxer.Message, args: list[str]) -> None:
         if not args:
-            await ctx.reply(f"Usage: `{config.COMMAND_PREFIX}track set loader <id> [loader]`")
+            await ctx.reply(content=f"Usage: `{config.COMMAND_PREFIX}track set loader <id> [loader]`")
             return
         pid = args[0]
         loader = args[1].lower() if len(args) > 1 else None
         if loader and loader not in _VALID_LOADERS:
-            await ctx.reply(f"`{loader}` is not a valid loader.")
+            await ctx.reply(content=f"`{loader}` is not a valid loader.")
             return
         data, entry = self._get_entry(ctx.guild_id, pid)
         if entry is None:
-            await ctx.reply(f"`{pid}` is not being tracked.")
+            await ctx.reply(content=f"`{pid}` is not being tracked.")
             return
         entry["loader"] = loader
         self.settings.set(ctx.guild_id, "modrinth", data)
         msg = f"Loader filter for `{pid}` set to `{loader}`." if loader else f"Loader filter for `{pid}` cleared."
-        await ctx.reply(embed=fluxer.Embed(description=msg, color=_COLOR_INFO))
+        await self._reply(ctx, embed=fluxer.Embed(description=msg, color=_COLOR_INFO))
 
     async def _set_roles(self, ctx: fluxer.Message, args: list[str]) -> None:
         if not args:
-            await ctx.reply(f"Usage: `{config.COMMAND_PREFIX}track set roles <id> [@role...]`")
+            await ctx.reply(content=f"Usage: `{config.COMMAND_PREFIX}track set roles <id> [@role...]`")
             return
         pid = args[0]
         roles = [r for a in args[1:] if (r := _parse_role(a))]
         data, entry = self._get_entry(ctx.guild_id, pid)
         if entry is None:
-            await ctx.reply(f"`{pid}` is not being tracked.")
+            await ctx.reply(content=f"`{pid}` is not being tracked.")
             return
         entry["roles"] = roles
         self.settings.set(ctx.guild_id, "modrinth", data)
         role_str = " ".join(f"<@&{r}>" for r in roles) or "None"
-        await ctx.reply(embed=fluxer.Embed(description=f"Ping roles for `{pid}`: {role_str}", color=_COLOR_INFO))
+        await self._reply(ctx, embed=fluxer.Embed(
+            description=f"Ping roles for `{pid}`: {role_str}",
+            color=_COLOR_INFO,
+        ))
 
     async def _set_mc_all(self, ctx: fluxer.Message, args: list[str]) -> None:
         data = self.settings.get(ctx.guild_id, "modrinth") or {}
         tracked = data.get("tracked", {})
         if not tracked:
-            await ctx.reply("No mods are being tracked.")
+            await ctx.reply(content="No mods are being tracked.")
             return
         for entry in tracked.values():
             entry["mc_versions"] = args
@@ -859,17 +843,17 @@ class ModrinthCog(fluxer.Cog):
             f"MC filter set to `{', '.join(args)}` for all {len(tracked)} mod(s)."
             if args else f"MC filter cleared for all {len(tracked)} mod(s)."
         )
-        await ctx.reply(embed=fluxer.Embed(description=msg, color=_COLOR_INFO))
+        await self._reply(ctx, embed=fluxer.Embed(description=msg, color=_COLOR_INFO))
 
     async def _set_loader_all(self, ctx: fluxer.Message, args: list[str]) -> None:
         loader = args[0].lower() if args else None
         if loader and loader not in _VALID_LOADERS:
-            await ctx.reply(f"`{loader}` is not a valid loader.")
+            await ctx.reply(content=f"`{loader}` is not a valid loader.")
             return
         data = self.settings.get(ctx.guild_id, "modrinth") or {}
         tracked = data.get("tracked", {})
         if not tracked:
-            await ctx.reply("No mods are being tracked.")
+            await ctx.reply(content="No mods are being tracked.")
             return
         for entry in tracked.values():
             entry["loader"] = loader
@@ -878,21 +862,21 @@ class ModrinthCog(fluxer.Cog):
             f"Loader set to `{loader}` for all {len(tracked)} mod(s)."
             if loader else f"Loader filter cleared for all {len(tracked)} mod(s)."
         )
-        await ctx.reply(embed=fluxer.Embed(description=msg, color=_COLOR_INFO))
+        await self._reply(ctx, embed=fluxer.Embed(description=msg, color=_COLOR_INFO))
 
     async def _set_mc_channel(self, ctx: fluxer.Message, args: list[str]) -> None:
         if not args:
-            await ctx.reply(f"Usage: `{config.COMMAND_PREFIX}track set mc-channel <#channel> [versions...]`")
+            await ctx.reply(content=f"Usage: `{config.COMMAND_PREFIX}track set mc-channel <#channel> [versions...]`")
             return
         channel_id = _parse_channel(args[0])
         if not channel_id:
-            await ctx.reply("Please mention a valid channel.")
+            await ctx.reply(content="Please mention a valid channel.")
             return
         versions = args[1:]
         data = self.settings.get(ctx.guild_id, "modrinth") or {}
         affected = [e for e in data.get("tracked", {}).values() if e.get("channel_id") == channel_id]
         if not affected:
-            await ctx.reply(f"No mods are posting to <#{channel_id}>.")
+            await ctx.reply(content=f"No mods are posting to <#{channel_id}>.")
             return
         for entry in affected:
             entry["mc_versions"] = versions
@@ -901,24 +885,24 @@ class ModrinthCog(fluxer.Cog):
             f"MC filter set to `{', '.join(versions)}` for {len(affected)} mod(s) in <#{channel_id}>."
             if versions else f"MC filter cleared for {len(affected)} mod(s) in <#{channel_id}>."
         )
-        await ctx.reply(embed=fluxer.Embed(description=msg, color=_COLOR_INFO))
+        await self._reply(ctx, embed=fluxer.Embed(description=msg, color=_COLOR_INFO))
 
     async def _set_loader_channel(self, ctx: fluxer.Message, args: list[str]) -> None:
         if not args:
-            await ctx.reply(f"Usage: `{config.COMMAND_PREFIX}track set loader-channel <#channel> [loader]`")
+            await ctx.reply(content=f"Usage: `{config.COMMAND_PREFIX}track set loader-channel <#channel> [loader]`")
             return
         channel_id = _parse_channel(args[0])
         if not channel_id:
-            await ctx.reply("Please mention a valid channel.")
+            await ctx.reply(content="Please mention a valid channel.")
             return
         loader = args[1].lower() if len(args) > 1 else None
         if loader and loader not in _VALID_LOADERS:
-            await ctx.reply(f"`{loader}` is not a valid loader.")
+            await ctx.reply(content=f"`{loader}` is not a valid loader.")
             return
         data = self.settings.get(ctx.guild_id, "modrinth") or {}
         affected = [e for e in data.get("tracked", {}).values() if e.get("channel_id") == channel_id]
         if not affected:
-            await ctx.reply(f"No mods are posting to <#{channel_id}>.")
+            await ctx.reply(content=f"No mods are posting to <#{channel_id}>.")
             return
         for entry in affected:
             entry["loader"] = loader
@@ -927,52 +911,52 @@ class ModrinthCog(fluxer.Cog):
             f"Loader set to `{loader}` for {len(affected)} mod(s) in <#{channel_id}>."
             if loader else f"Loader filter cleared for {len(affected)} mod(s) in <#{channel_id}>."
         )
-        await ctx.reply(embed=fluxer.Embed(description=msg, color=_COLOR_INFO))
+        await self._reply(ctx, embed=fluxer.Embed(description=msg, color=_COLOR_INFO))
 
     async def _set_roles_channel(self, ctx: fluxer.Message, args: list[str]) -> None:
         if not args:
-            await ctx.reply(f"Usage: `{config.COMMAND_PREFIX}track set roles-channel <#channel> [@role...]`")
+            await ctx.reply(content=f"Usage: `{config.COMMAND_PREFIX}track set roles-channel <#channel> [@role...]`")
             return
         channel_id = _parse_channel(args[0])
         if not channel_id:
-            await ctx.reply("Please mention a valid channel.")
+            await ctx.reply(content="Please mention a valid channel.")
             return
         roles = [r for a in args[1:] if (r := _parse_role(a))]
         data = self.settings.get(ctx.guild_id, "modrinth") or {}
         affected = [e for e in data.get("tracked", {}).values() if e.get("channel_id") == channel_id]
         if not affected:
-            await ctx.reply(f"No mods are posting to <#{channel_id}>.")
+            await ctx.reply(content=f"No mods are posting to <#{channel_id}>.")
             return
         for entry in affected:
             entry["roles"] = roles
         self.settings.set(ctx.guild_id, "modrinth", data)
         role_str = " ".join(f"<@&{r}>" for r in roles) or "None"
-        await ctx.reply(embed=fluxer.Embed(
+        await self._reply(ctx, embed=fluxer.Embed(
             description=f"Ping roles for {len(affected)} mod(s) in <#{channel_id}> set to: {role_str}",
             color=_COLOR_INFO,
         ))
 
     async def _set_channel_channel(self, ctx: fluxer.Message, args: list[str]) -> None:
         if len(args) < 2:
-            await ctx.reply(f"Usage: `{config.COMMAND_PREFIX}track set channel-channel <#old> <#new>`")
+            await ctx.reply(content=f"Usage: `{config.COMMAND_PREFIX}track set channel-channel <#old> <#new>`")
             return
         old_id = _parse_channel(args[0])
         new_id = _parse_channel(args[1])
         if not old_id:
-            await ctx.reply("Could not parse the old channel. Please use a #mention.")
+            await ctx.reply(content="Could not parse the old channel. Please use a #mention.")
             return
         if not new_id:
-            await ctx.reply("Could not parse the new channel. Please use a #mention.")
+            await ctx.reply(content="Could not parse the new channel. Please use a #mention.")
             return
         data = self.settings.get(ctx.guild_id, "modrinth") or {}
         affected = [e for e in data.get("tracked", {}).values() if e.get("channel_id") == old_id]
         if not affected:
-            await ctx.reply(f"No mods are posting to <#{old_id}>.")
+            await ctx.reply(content=f"No mods are posting to <#{old_id}>.")
             return
         for entry in affected:
             entry["channel_id"] = new_id
         self.settings.set(ctx.guild_id, "modrinth", data)
-        await ctx.reply(embed=fluxer.Embed(
+        await self._reply(ctx, embed=fluxer.Embed(
             description=f"Moved **{len(affected)}** mod(s) from <#{old_id}> to <#{new_id}>.",
             color=_COLOR_INFO,
         ))
@@ -982,7 +966,6 @@ class ModrinthCog(fluxer.Cog):
     # =========================================================================
 
     def _get_entry(self, guild_id: int, pid: str) -> tuple[dict, dict | None]:
-        """Return (full modrinth data dict, entry dict or None) for a project ID."""
         data = self.settings.get(guild_id, "modrinth") or {}
         entry = data.get("tracked", {}).get(pid)
         if entry is None:
@@ -1006,13 +989,11 @@ class ModrinthCog(fluxer.Cog):
                 f"`{p}track add <id> <#ch> [@role...] [--mc ver] [--loader x]`\n"
                 f"`{p}track bulk <#ch> [@role...] [--loader x] [--mc ver] -- <id1> <id2> …`\n"
                 f"`{p}track remove <id>` · `{p}track list` · `{p}track check`\n\n"
-
                 f"**Per-project settings**\n"
                 f"`{p}track set channel <id> <#ch>`\n"
                 f"`{p}track set mc <id> [versions…]`\n"
                 f"`{p}track set loader <id> [loader]`\n"
                 f"`{p}track set roles <id> [@role…]`\n\n"
-
                 f"**Bulk settings**\n"
                 f"`{p}track set mc-all [versions…]`\n"
                 f"`{p}track set loader-all [loader]`\n"
@@ -1020,13 +1001,10 @@ class ModrinthCog(fluxer.Cog):
                 f"`{p}track set loader-channel <#ch> [loader]`\n"
                 f"`{p}track set roles-channel <#ch> [@role…]`\n"
                 f"`{p}track set channel-channel <#old> <#new>`\n\n"
-
                 f"**Server defaults**\n"
                 f"`{p}track default loader [loader]`\n\n"
-
                 f"**Bot owner only**\n"
                 f"`{p}track interval <seconds>` — min {_MIN_INTERVAL}s\n\n"
-
                 f"Valid loaders: {', '.join(sorted(_VALID_LOADERS))}\n"
                 f"Use a Modrinth slug (e.g. `sodium`) or full project ID.\n"
                 f"All commands require **Manage Guild** permission."
