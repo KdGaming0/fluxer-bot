@@ -404,11 +404,11 @@ class HypixelMonitorCog(fluxer.Cog):
                     if not thread["content"]:
                         thread["content"] = await self._get_thread_content(session, thread["url"])
                     detect = self._score_text(thread["title"], thread["content"], keywords)
+                    await self._add_processed(guild_id, thread["id"])
                     if self._should_notify(thread, detect, guild_id):
                         await self._notify(guild_id, thread, detect)
                         notified += 1
                         log.info("Notified: %s in %s (guild %d)", thread["id"], cat["name"], guild_id)
-                    await self._add_processed(guild_id, thread["id"])
             except Exception:
                 log.exception("Category error (%s): guild %d", cat["name"], guild_id)
 

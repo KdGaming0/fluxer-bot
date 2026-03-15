@@ -374,13 +374,11 @@ class RedditMonitorCog(fluxer.Cog):
                     title  = submission.title or ""
                     body   = getattr(submission, "selftext", "") or ""
                     detect = self._score_text(title, body, keywords)
-
+                    await self._add_processed(guild_id, submission.id)
                     if self._should_notify(submission, detect, guild_id):
                         await self._notify(guild_id, submission, detect)
                         notified += 1
                         log.info("Notified: %s in r/%s (guild %d)", submission.id, sub_name, guild_id)
-
-                    await self._add_processed(guild_id, submission.id)
 
             except Exception:
                 log.exception("Subreddit error (%s): guild %d", sub_name, guild_id)
