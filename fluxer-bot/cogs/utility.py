@@ -243,17 +243,32 @@ class UtilityCog(fluxer.Cog):
 
     @fluxer.Cog.command(name="ping")
     async def ping(self, ctx: fluxer.Message) -> None:
-        """Measure round-trip latency."""
+        """Measure round-trip latency.
+
+        Note: edit_message() does not serialize Embed objects in its JSON
+        payload, so we measure the time to ctx.reply() directly instead of
+        the send-then-edit pattern.
+        """
         start = time.monotonic()
-        sent = await ctx.reply("Pinging…")
+        await ctx.reply(
+            embed=fluxer.Embed(
+                title="Pong!",
+                description="Measuring…",
+                color=_COLOR,
+            )
+        )
         elapsed_ms = (time.monotonic() - start) * 1000
 
-        embed = fluxer.Embed(
-            title="Pong!",
-            description=f"Round-trip: **{elapsed_ms:.0f} ms**",
-            color=_COLOR,
-        )
-        await sent.edit(content="", embeds=[embed])
+        # Send the actual result as a follow-up in the same channel
+        channel = self.bot._channels.get(ctx.channel_id)
+        if channel:
+            await channel.send(
+                embed=fluxer.Embed(
+                    title="Pong!",
+                    description=f"Round-trip: **{elapsed_ms:.0f} ms**",
+                    color=_COLOR,
+                )
+            )
 
     @fluxer.Cog.command(name="serverinfo")
     async def serverinfo(self, ctx: fluxer.Message) -> None:
@@ -281,6 +296,7 @@ class UtilityCog(fluxer.Cog):
         if guild.icon_url:
             embed.set_thumbnail(url=guild.icon_url)
 
+        # FIX: send as a fresh message so the command text isn't quoted in the reply
         channel = self.bot._channels.get(ctx.channel_id)
         if channel:
             await channel.send(embed=embed)
@@ -338,6 +354,7 @@ class UtilityCog(fluxer.Cog):
         if target_user.avatar_url:
             embed.set_thumbnail(url=target_user.avatar_url)
 
+        # FIX: same as serverinfo — send fresh to avoid reply quoting the command
         channel = self.bot._channels.get(ctx.channel_id)
         if channel:
             await channel.send(embed=embed)
