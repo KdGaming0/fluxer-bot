@@ -245,7 +245,6 @@ class UtilityCog(fluxer.Cog):
     async def ping(self, ctx: fluxer.Message) -> None:
         """Measure round-trip latency."""
         start = time.monotonic()
-        # Send a placeholder, then edit it so we capture round-trip time
         sent = await ctx.reply("Pinging…")
         elapsed_ms = (time.monotonic() - start) * 1000
 
@@ -254,7 +253,7 @@ class UtilityCog(fluxer.Cog):
             description=f"Round-trip: **{elapsed_ms:.0f} ms**",
             color=_COLOR,
         )
-        await sent.edit(content="", embed=embed)
+        await sent.edit(content="", embeds=[embed])
 
     @fluxer.Cog.command(name="serverinfo")
     async def serverinfo(self, ctx: fluxer.Message) -> None:
@@ -282,7 +281,11 @@ class UtilityCog(fluxer.Cog):
         if guild.icon_url:
             embed.set_thumbnail(url=guild.icon_url)
 
-        await ctx.reply(embed=embed)
+        channel = self.bot._channels.get(ctx.channel_id)
+        if channel:
+            await channel.send(embed=embed)
+        else:
+            await ctx.reply(embed=embed)
 
     @fluxer.Cog.command(name="userinfo")
     async def userinfo(self, ctx: fluxer.Message) -> None:
@@ -335,7 +338,11 @@ class UtilityCog(fluxer.Cog):
         if target_user.avatar_url:
             embed.set_thumbnail(url=target_user.avatar_url)
 
-        await ctx.reply(embed=embed)
+        channel = self.bot._channels.get(ctx.channel_id)
+        if channel:
+            await channel.send(embed=embed)
+        else:
+            await ctx.reply(embed=embed)
 
     @fluxer.Cog.command(name="remind")
     async def remind(self, ctx: fluxer.Message, *, args: str = "") -> None:
