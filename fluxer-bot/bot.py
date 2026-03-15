@@ -65,8 +65,8 @@ async def main() -> None:
         sys.exit(1)
 
     await load_cogs()
+    await bot.start(config.BOT_TOKEN)
 
 
 if __name__ == "__main__":
     asyncio.run(main())
-    bot.run(config.BOT_TOKEN)
