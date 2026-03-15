@@ -30,6 +30,7 @@ Storage layout in guild_settings.json:
 """
 
 import logging
+import re
 
 import fluxer
 import config
@@ -452,25 +453,25 @@ class RolesCog(fluxer.Cog):
     # =========================================================================
 
     def _find_role(self, guild, query: str):
-        """Resolve a role by mention, ID, or name (case-insensitive)."""
+        """Resolve a role by mention (<@&ID>), raw ID, or name (case-insensitive)."""
         if guild is None:
             return None
 
         roles = getattr(guild, "roles", [])
 
-        # Mention format: <@&123456>
-        if query.startswith("<@&") and query.endswith(">"):
-            role_id = int(query[3:-1])
+        m = re.fullmatch(r"<@&(\d+)>", query)
+        if m:
+            role_id = int(m.group(1))
             return next((r for r in roles if r.id == role_id), None)
 
-        # Raw ID
+        # Raw snowflake ID
         if query.isdigit():
             role_id = int(query)
             return next((r for r in roles if r.id == role_id), None)
 
-        # Name (case-insensitive) - strip leading @ if user typed @Role Name
-        name = query.lstrip("@").strip()
-        return next((r for r in roles if r.name.lower() == name.lower()), None)
+        # Plain name fallback (strip @ in case user typed @Name without triggering autocomplete)
+        name = query.lstrip("@").strip().lower()
+        return next((r for r in roles if r.name.lower() == name), None)
 
 
 # ── Extension setup ───────────────────────────────────────────────────────────
