@@ -635,35 +635,51 @@ class ModrinthCog(fluxer.Cog):
             cid = entry.get("channel_id")
             by_channel.setdefault(cid, []).append((pid, entry))
 
-        lines = [f"**Tracked Mods — {len(tracked)} total**\n"]
-
+        # Build all fields first
+        all_fields: list[tuple[str, str]] = []  # (name, value)
         for channel_id, entries in sorted(by_channel.items(), key=lambda x: x[0]):
-            lines.append(f"<#{channel_id}> — {len(entries)} mod{'s' if len(entries) != 1 else ''}")
+            lines = []
             for pid, entry in sorted(entries, key=lambda x: x[1].get("project_name", "").lower()):
                 loader = entry.get("loader") or "any"
                 mc = ", ".join(entry.get("mc_versions") or []) or "any"
-                lines.append(f"  • **{entry.get('project_name', pid)}** · loader: `{loader}` · mc: `{mc}`")
-            lines.append("")
+                lines.append(f"• **{entry.get('project_name', pid)}** · loader: `{loader}` · mc: `{mc}`")
+            channel_label = f"<#{channel_id}> ({len(entries)} mod{'s' if len(entries) != 1 else ''})"
+            # Chunk lines into ≤1024-char field values
+            current = ""
+            first = True
+            for line in lines:
+                candidate = (current + "\n" + line).lstrip("\n") if current else line
+                if len(candidate) > 1024:
+                    all_fields.append((channel_label if first else f"{channel_label} cont.", current))
+                    first = False
+                    current = line
+                else:
+                    current = candidate
+            if current:
+                all_fields.append((channel_label if first else f"{channel_label} cont.", current))
 
         default_loader = data.get("default_loader")
-        if default_loader:
-            lines.append(f"_Server default loader: {default_loader}_")
+        footer = f"Server default loader: {default_loader}" if default_loader else None
 
-        # Split into ≤2000-char messages
-        messages: list[str] = []
-        current = ""
-        for line in lines:
-            candidate = current + line + "\n"
-            if len(candidate) > 1900:
-                messages.append(current)
-                current = line + "\n"
+        # Send in batches of 25 fields per embed
+        batch_size = 25
+        batches = [all_fields[i:i + batch_size] for i in range(0, len(all_fields), batch_size)]
+        first_message = True
+        for i, batch in enumerate(batches):
+            embed = fluxer.Embed(
+                title=f"Tracked Mods — {len(tracked)} total" if i == 0 else f"Tracked Mods (cont. {i + 1})",
+                color=_COLOR_INFO,
+            )
+            for name, value in batch:
+                embed.add_field(name=name, value=value, inline=False)
+            if i == len(batches) - 1 and footer:
+                embed.set_footer(text=footer)
+
+            if first_message:
+                await ctx.reply(content=" ", embed=embed)
+                first_message = False
             else:
-                current = candidate
-        if current:
-            messages.append(current)
-
-        for msg in messages:
-            await ctx.reply(content=msg)
+                await ctx.send_to_channel(self.channel_id, content=" ", embed=embed)
 
     async def _cmd_check(self, ctx: fluxer.Message, args: list[str] = None) -> None:
         await ctx.reply(content="🔍 Running manual update check…")
