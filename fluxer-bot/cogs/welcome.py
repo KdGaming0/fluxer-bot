@@ -47,10 +47,18 @@ class WelcomeCog(fluxer.Cog):
             await ctx.reply("This command can only be used inside a server.")
             return
 
+        # Extract only the argument after the exact command word + one space (or end).
+        # We match "setwelcome" followed by end-of-string or a space, NOT "setwelcomemsg".
         raw = ctx.content.strip()
-        args = raw[len(f"{config.COMMAND_PREFIX}setwelcome"):].strip()
-        if args.startswith("msg"):
+        prefix_cmd = f"{config.COMMAND_PREFIX}setwelcome"
+
+        # Guard: if the command token is longer than "setwelcome" (e.g. "setwelcomemsg"),
+        # this handler was invoked incorrectly — bail out silently.
+        token_end = len(prefix_cmd)
+        if len(raw) > token_end and raw[token_end] not in (" ", "\t"):
             return
+
+        args = raw[token_end:].strip()
 
         if not args:
             self.settings.delete(ctx.guild_id, "welcome_channel_id")
@@ -98,7 +106,7 @@ class WelcomeCog(fluxer.Cog):
     async def setwelcomemsg(self, ctx: fluxer.Message) -> None:
         """Set a custom welcome message.
 
-        Usage:  !setwelcomemsg Hey {user}, welcome to {server}! You are member #{count}.
+        Usage:  !setwelcomemsg Hey {user}, welcome to {server}!
                 !setwelcomemsg       <- resets to default message
 
         Placeholders:
@@ -111,7 +119,8 @@ class WelcomeCog(fluxer.Cog):
             await ctx.reply("This command can only be used inside a server.")
             return
 
-        args = ctx.content.strip()[len(f"{config.COMMAND_PREFIX}setwelcomemsg"):].strip()
+        prefix_cmd = f"{config.COMMAND_PREFIX}setwelcomemsg"
+        args = ctx.content.strip()[len(prefix_cmd):].strip()
 
         if not args:
             self.settings.delete(ctx.guild_id, "welcome_message")
@@ -184,7 +193,6 @@ class WelcomeCog(fluxer.Cog):
         guild = self.bot._guilds.get(guild_id)
         guild_name = guild.name if guild else "the server"
         member_count = len(guild.members) if guild and hasattr(guild, "members") else "?"
-        display = member.nick or member.user.global_name or member.user.username
 
         template = self.settings.get(guild_id, "welcome_message") or DEFAULT_MESSAGE
         description = self._format_message(template, member.user, guild_name, member_count)
