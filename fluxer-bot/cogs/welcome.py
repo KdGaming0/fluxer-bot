@@ -7,13 +7,13 @@ Setup (run once after adding the bot to your server):
     !setwelcome #your-channel-name
 
 Commands:
-    !setwelcome #channel     - Set the welcome channel
-    !setwelcome              - Clear the welcome channel
-    !setwelcomemsg <message> - Set a custom welcome message
-                               Use {user} for mention, {name} for display name,
-                               {server} for server name, {count} for member count
-    !setwelcomemsg           - Reset to default message
-    !welcomepreview          - Preview the current welcome message
+    !setwelcome #channel          - Set the welcome channel
+    !setwelcome                   - Clear the welcome channel
+    !setwelcome msg <message>     - Set a custom welcome message
+                                    Use {user} for mention, {name} for display name,
+                                    {server} for server name, {count} for member count
+    !setwelcome msg               - Reset to default message
+    !setwelcome preview           - Preview the current welcome message
 """
 
 import logging
@@ -38,28 +38,45 @@ class WelcomeCog(fluxer.Cog):
 
     @fluxer.Cog.command(name="setwelcome")
     async def setwelcome(self, ctx: fluxer.Message) -> None:
-        """Set the welcome channel for this server.
+        """Main setwelcome command — dispatches subcommands or sets the channel.
 
-        Usage:  !setwelcome #channel-name
-                !setwelcome          <- clears the welcome channel
+        Usage:
+            !setwelcome #channel       - Set welcome channel
+            !setwelcome                - Clear welcome channel
+            !setwelcome msg <text>     - Set custom welcome message
+            !setwelcome msg            - Reset to default message
+            !setwelcome preview        - Preview current welcome message
         """
         if ctx.guild_id is None:
             await ctx.reply("This command can only be used inside a server.")
             return
 
-        # Extract only the argument after the exact command word + one space (or end).
-        # We match "setwelcome" followed by end-of-string or a space, NOT "setwelcomemsg".
-        raw = ctx.content.strip()
         prefix_cmd = f"{config.COMMAND_PREFIX}setwelcome"
+        raw = ctx.content.strip()
+        args_str = raw[len(prefix_cmd):].strip()
 
-        # Guard: if the command token is longer than "setwelcome" (e.g. "setwelcomemsg"),
-        # this handler was invoked incorrectly — bail out silently.
-        token_end = len(prefix_cmd)
-        if len(raw) > token_end and raw[token_end] not in (" ", "\t"):
+        # Split into tokens: first token may be a subcommand
+        tokens = args_str.split(None, 1)
+        first = tokens[0].lower() if tokens else ""
+
+        # ── Subcommand: preview ───────────────────────────────────────────
+        if first == "preview":
+            await self._subcmd_preview(ctx)
             return
 
-        args = raw[token_end:].strip()
+        # ── Subcommand: msg ───────────────────────────────────────────────
+        if first == "msg":
+            message_text = tokens[1].strip() if len(tokens) > 1 else ""
+            await self._subcmd_msg(ctx, message_text)
+            return
 
+        # ── Default: set or clear channel ─────────────────────────────────
+        await self._subcmd_channel(ctx, args_str)
+
+    # ── Subcommand handlers ───────────────────────────────────────────────────
+
+    async def _subcmd_channel(self, ctx: fluxer.Message, args: str) -> None:
+        """Set or clear the welcome channel."""
         if not args:
             self.settings.delete(ctx.guild_id, "welcome_channel_id")
             await ctx.reply("Welcome channel cleared. No welcome messages will be sent.")
@@ -95,69 +112,40 @@ class WelcomeCog(fluxer.Cog):
                 f"New members will be welcomed in **#{channel.name}**.\n\n"
                 f"To change it: `{config.COMMAND_PREFIX}setwelcome #other-channel`\n"
                 f"To disable it: `{config.COMMAND_PREFIX}setwelcome` with no argument.\n\n"
-                f"To customize the message: `{config.COMMAND_PREFIX}setwelcomemsg <message>`\n"
+                f"To customize the message: `{config.COMMAND_PREFIX}setwelcome msg <message>`\n"
                 f"Available placeholders: `{{user}}` `{{name}}` `{{server}}` `{{count}}`"
             ),
             color=config.WELCOME_EMBED_COLOR,
         )
         await ctx.reply(embed=embed)
 
-    @fluxer.Cog.command(name="setwelcomemsg")
-    async def setwelcomemsg(self, ctx: fluxer.Message) -> None:
-        """Set a custom welcome message.
-
-        Usage:  !setwelcomemsg Hey {user}, welcome to {server}!
-                !setwelcomemsg       <- resets to default message
-
-        Placeholders:
-            {user}   - Mentions the user e.g. @John
-            {name}   - Display name of the user
-            {server} - Server name
-            {count}  - Current member count
-        """
-        if ctx.guild_id is None:
-            await ctx.reply("This command can only be used inside a server.")
-            return
-
-        try:
-            prefix_cmd = f"{config.COMMAND_PREFIX}setwelcomemsg"
-            raw = ctx.content.strip()
-            args = raw[len(prefix_cmd):].strip() if raw.lower().startswith(prefix_cmd.lower()) else ""
-
-            if not args:
-                self.settings.delete(ctx.guild_id, "welcome_message")
-                embed = fluxer.Embed(
-                    title="Welcome message reset",
-                    description=f"The welcome message has been reset to the default:\n\n{DEFAULT_MESSAGE}",
-                    color=config.WELCOME_EMBED_COLOR,
-                )
-                await ctx.reply(embed=embed)
-                return
-
-            self.settings.set(ctx.guild_id, "welcome_message", args)
-            log.info("Welcome message updated in guild %d", ctx.guild_id)
-
+    async def _subcmd_msg(self, ctx: fluxer.Message, message_text: str) -> None:
+        """Set or reset the custom welcome message."""
+        if not message_text:
+            self.settings.delete(ctx.guild_id, "welcome_message")
             embed = fluxer.Embed(
-                title="Welcome message updated",
-                description=(
-                    f"New welcome message:\n\n{args}\n\n"
-                    f"Use `{config.COMMAND_PREFIX}welcomepreview` to preview it."
-                ),
+                title="Welcome message reset",
+                description=f"The welcome message has been reset to the default:\n\n{DEFAULT_MESSAGE}",
                 color=config.WELCOME_EMBED_COLOR,
             )
             await ctx.reply(embed=embed)
-
-        except Exception as exc:
-            log.exception("setwelcomemsg failed in guild %d: %s", ctx.guild_id, exc)
-            await ctx.reply(f"Something went wrong saving the welcome message: {exc}")
-
-    @fluxer.Cog.command(name="welcomepreview")
-    async def welcomepreview(self, ctx: fluxer.Message) -> None:
-        """Preview the current welcome message using yourself as the test user."""
-        if ctx.guild_id is None:
-            await ctx.reply("This command can only be used inside a server.")
             return
 
+        self.settings.set(ctx.guild_id, "welcome_message", message_text)
+        log.info("Welcome message updated in guild %d", ctx.guild_id)
+
+        embed = fluxer.Embed(
+            title="Welcome message updated",
+            description=(
+                f"New welcome message:\n\n{message_text}\n\n"
+                f"Use `{config.COMMAND_PREFIX}setwelcome preview` to preview it."
+            ),
+            color=config.WELCOME_EMBED_COLOR,
+        )
+        await ctx.reply(embed=embed)
+
+    async def _subcmd_preview(self, ctx: fluxer.Message) -> None:
+        """Preview the current welcome message."""
         guild = self.bot._guilds.get(ctx.guild_id)
         guild_name = guild.name if guild else "the server"
         member_count = len(guild.members) if guild and hasattr(guild, "members") else "?"
@@ -166,14 +154,14 @@ class WelcomeCog(fluxer.Cog):
         description = self._format_message(template, ctx.author, guild_name, member_count)
 
         embed = fluxer.Embed(
-            title="👋 Welcome message preview",
+            title="Welcome message preview",
             description=description,
             color=config.WELCOME_EMBED_COLOR,
         )
         embed.set_footer(text="This is a preview using your account.")
         await ctx.reply(embed=embed)
 
-    # ── Listeners ─────────────────────────────────────────────────────────────
+    # ── Listener ──────────────────────────────────────────────────────────────
 
     @fluxer.Cog.listener()
     async def on_member_join(self, data: dict) -> None:
@@ -230,7 +218,6 @@ class WelcomeCog(fluxer.Cog):
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _format_message(self, template: str, user, guild_name: str, member_count) -> str:
-        """Replace placeholders in the welcome message template."""
         display = getattr(user, "global_name", None) or getattr(user, "username", str(user))
         mention = f"<@{user.id}>" if hasattr(user, "id") else display
         return (
@@ -242,7 +229,6 @@ class WelcomeCog(fluxer.Cog):
         )
 
     def _find_channel_by_name(self, guild_id: int, name: str) -> fluxer.Channel | None:
-        """Find a cached channel by name within a specific guild."""
         for channel in self.bot._channels.values():
             if channel.guild_id == guild_id and channel.name == name:
                 return channel
