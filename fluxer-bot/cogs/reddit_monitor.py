@@ -22,7 +22,7 @@ Commands (require Manage Guild, except !rmonitor cleartasks which needs OWNER_ID
     !rmonitor enable / disable / restart
     !rmonitor setinterval <seconds>
     !rmonitor setthreshold <float>
-    !rmonitor addsub <name> / remsub <name> / listsubs
+    !rmonitor addsub <n> / remsub <n> / listsubs
     !rmonitor setflair [flair text]
     !rmonitor loaddefaults [merge]
     !rmonitor processedcount / clearprocessed / setmaxprocessed <n>
@@ -108,11 +108,6 @@ class RedditMonitorCog(fluxer.Cog):
 
     @fluxer.Cog.listener()
     async def on_guild_join(self, guild: fluxer.Guild) -> None:
-        """Called for every guild on connect (GUILD_CREATE) and when joining new ones.
-
-        on_ready fires before guild data arrives, so we use on_guild_join instead —
-        the gateway sends one GUILD_CREATE per guild immediately after READY.
-        """
         if self._get(guild.id, "enabled", False):
             await self._ensure_task(guild)
             log.info("RedditMonitor resuming task for guild %d (%s)", guild.id, guild)
@@ -196,9 +191,7 @@ class RedditMonitorCog(fluxer.Cog):
 
     @staticmethod
     def _score_text(title: str, body: str, keywords: Dict[str, List[str]]) -> ScoreResult:
-        """Delegate to the shared :func:`utils.detection.score_text`."""
         return score_text(title, body, keywords)
-
 
     def _should_notify(
         self,
@@ -206,7 +199,6 @@ class RedditMonitorCog(fluxer.Cog):
         detect: ScoreResult,
         guild_id: int,
     ) -> bool:
-        """Delegate to the shared :func:`utils.detection.should_notify`."""
         threshold = self._get(guild_id, "threshold") or DEFAULT_THRESHOLD
         return should_notify(
             submission.title or "",
@@ -215,36 +207,13 @@ class RedditMonitorCog(fluxer.Cog):
             threshold,
         )
 
-        threshold = self._get(guild_id, "threshold") or DEFAULT_THRESHOLD
-        if detect["score"] < threshold:
-            return False
-
-        title    = (submission.title or "").lower()
-        body     = getattr(submission, "selftext", "").lower()
-        combined = f"{title} {body}"
-
-        neg = len(detect["matches"]["negative"])
-        pos = len(detect["matches"]["normal"]) + len(detect["matches"]["lower"])
-        if neg >= pos and neg > 1:
-            return False
-
-        for pat in FALSE_POSITIVE_PATTERNS:
-            if pat.search(combined):
-                return False
-
-        if detect["score"] < threshold + 1.5:
-            if not detect["matches"]["normal"] and detect["context_boost"] < 1.0:
-                return False
-
-        return True
-
     # ── Notification ──────────────────────────────────────────────────────────
 
     async def _notify(
         self,
         guild_id: int,
         submission: asyncpraw.models.Submission,
-        detect: dict,
+        detect: ScoreResult,
     ) -> None:
         ch_id = self._get(guild_id, "notify_channel_id")
         if not ch_id:
@@ -253,10 +222,10 @@ class RedditMonitorCog(fluxer.Cog):
         if not channel:
             return
 
-        score   = detect["score"]
+        score   = detect.score
         created = datetime.fromtimestamp(submission.created_utc, tz=timezone.utc)
 
-        if detect["immediate"]:
+        if detect.immediate:
             confidence, color = "🔴 HIGH (Immediate)", _C_RED
         elif score >= 6.0:
             confidence, color = "🟠 HIGH",   _C_ORANGE
@@ -278,17 +247,17 @@ class RedditMonitorCog(fluxer.Cog):
         )
 
         for tier in ("higher", "normal"):
-            vals = detect["matches"].get(tier, [])
+            vals = detect.matches.get(tier, [])
             if vals:
                 embed.add_field(
                     name=f"{tier.title()} Keywords",
                     value=", ".join(vals[:6]) + ("…" if len(vals) > 6 else ""),
                     inline=False,
                 )
-        if detect["matches"].get("negative"):
+        if detect.matches.get("negative"):
             embed.add_field(
                 name="⚠️ Negative Indicators",
-                value=", ".join(detect["matches"]["negative"][:4]),
+                value=", ".join(detect.matches["negative"][:4]),
                 inline=False,
             )
 
@@ -553,7 +522,6 @@ class RedditMonitorCog(fluxer.Cog):
         ))
 
     async def _cmd_setcreds(self, ctx: fluxer.Message, args: str) -> None:
-        """Usage: !rmonitor setcreds <client_id> <client_secret> <user_agent>"""
         parts = args.strip().split(None, 2)
         if len(parts) < 3:
             await ctx.reply(content=(
@@ -567,7 +535,6 @@ class RedditMonitorCog(fluxer.Cog):
         self._set(ctx.guild_id, "reddit_client_secret", client_secret)
         self._set(ctx.guild_id, "reddit_user_agent",    user_agent)
 
-        # Invalidate cached client
         old = self._reddit_clients.pop(ctx.guild_id, None)
         if old:
             try:
@@ -575,7 +542,6 @@ class RedditMonitorCog(fluxer.Cog):
             except Exception:
                 pass
 
-        # Delete the message to protect the secret
         try:
             await ctx.delete()
         except Exception:
@@ -801,26 +767,24 @@ class RedditMonitorCog(fluxer.Cog):
         kw     = self._get(ctx.guild_id, "keywords") or deepcopy(DEFAULT_KEYWORDS)
         detect = self._score_text(title.strip(), body.strip(), kw)
         lines  = [
-            f"**Immediate**: {detect['immediate']}",
-            f"**Score**: {detect['score']}  (context boost: +{detect['context_boost']})",
+            f"**Immediate**: {detect.immediate}",
+            f"**Score**: {detect.score}  (context boost: +{detect.context_boost})",
             "**Matches by tier:**",
         ]
-        for tier, vals in detect["matches"].items():
+        for tier, vals in detect.matches.items():
             lines.append(f"  {tier}: {', '.join(vals) if vals else '*(none)*'}")
-        if detect["breakdown"]:
+        if detect.breakdown:
             lines.append("**Scoring breakdown (first 15):**")
-            for kw_name, (tier, pts) in list(detect["breakdown"].items())[:15]:
+            for kw_name, (tier, pts) in list(detect.breakdown.items())[:15]:
                 lines.append(f"  `{kw_name}` [{tier}] → {pts:+.1f}")
         await ctx.reply(content="\n".join(lines))
 
     async def _cmd_tune(self, ctx: fluxer.Message, args: str) -> None:
-        """Usage: !rmonitor tune <subreddit> [limit]"""
         parts = args.strip().split()
         if not parts:
             await ctx.reply(content=f"Usage: `{config.COMMAND_PREFIX}rmonitor tune <subreddit> [limit]`")
             return
 
-        # If last arg is a number, treat it as limit
         limit = 10
         if len(parts) > 1 and parts[-1].isdigit():
             limit = int(parts[-1])
@@ -845,10 +809,10 @@ class RedditMonitorCog(fluxer.Cog):
                 detect = self._score_text(title, body, kw)
                 would_notify = self._should_notify(submission, detect, ctx.guild_id)
                 top_kws = ", ".join(
-                    (detect["matches"].get("higher") or [])[:2] +
-                    (detect["matches"].get("normal") or [])[:3]
+                    (detect.matches.get("higher") or [])[:2] +
+                    (detect.matches.get("normal") or [])[:3]
                 ) or "—"
-                rows.append((title[:48], detect["score"], "✓" if would_notify else "✗", top_kws[:30]))
+                rows.append((title[:48], detect.score, "✓" if would_notify else "✗", top_kws[:30]))
 
             header = f"{'Title':<50} {'Score':<6} {'Notify':<7} Top keywords\n" + "─" * 85
             body_t = "\n".join(f"{t:<50} {s:<6.1f} {n:<7} {k}" for t, s, n, k in rows)
@@ -1052,7 +1016,7 @@ class RedditMonitorCog(fluxer.Cog):
                 f"`{p}rmonitor setcreds <id> <secret> <user_agent>` *(use a private channel)*\n"
                 f"`{p}rmonitor setchannel #channel`\n\n"
                 f"**Subreddits**\n"
-                f"`{p}rmonitor addsub <name>` · `{p}rmonitor remsub <name>` · `{p}rmonitor listsubs`\n"
+                f"`{p}rmonitor addsub <n>` · `{p}rmonitor remsub <n>` · `{p}rmonitor listsubs`\n"
                 f"`{p}rmonitor setflair [flair text]`\n\n"
                 f"**Control**\n"
                 f"`{p}rmonitor enable` · `{p}rmonitor disable` · `{p}rmonitor restart`\n\n"

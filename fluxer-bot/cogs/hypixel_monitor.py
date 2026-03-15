@@ -119,11 +119,6 @@ class HypixelMonitorCog(fluxer.Cog):
 
     @fluxer.Cog.listener()
     async def on_guild_join(self, guild: fluxer.Guild) -> None:
-        """Called for every guild on connect (GUILD_CREATE) and when joining new ones.
-
-        on_ready fires before guild data arrives, so we use on_guild_join instead —
-        the gateway sends one GUILD_CREATE per guild immediately after READY.
-        """
         if self._get(guild.id, "enabled", False):
             await self._ensure_task(guild)
             log.info("HypixelMonitor resuming task for guild %d (%s)", guild.id, guild)
@@ -199,12 +194,9 @@ class HypixelMonitorCog(fluxer.Cog):
 
     @staticmethod
     def _score_text(title: str, body: str, keywords: Dict[str, List[str]]) -> ScoreResult:
-        """Delegate to the shared :func:`utils.detection.score_text`."""
         return score_text(title, body, keywords)
 
-
     def _should_notify(self, thread_data: dict, detect: ScoreResult, guild_id: int) -> bool:
-        """Delegate to the shared :func:`utils.detection.should_notify`."""
         threshold = self._get(guild_id, "threshold") or DEFAULT_THRESHOLD
         return should_notify(
             thread_data.get("title", ""),
@@ -213,32 +205,9 @@ class HypixelMonitorCog(fluxer.Cog):
             threshold,
         )
 
-        threshold = self._get(guild_id, "threshold") or DEFAULT_THRESHOLD
-        if detect["score"] < threshold:
-            return False
-
-        title    = thread_data.get("title", "").lower()
-        body     = thread_data.get("content", "").lower()
-        combined = f"{title} {body}"
-
-        neg = len(detect["matches"]["negative"])
-        pos = len(detect["matches"]["normal"]) + len(detect["matches"]["lower"])
-        if neg >= pos and neg > 1:
-            return False
-
-        for pat in FALSE_POSITIVE_PATTERNS:
-            if pat.search(combined):
-                return False
-
-        if detect["score"] < threshold + 1.5:
-            if not detect["matches"]["normal"] and detect["context_boost"] < 1.0:
-                return False
-
-        return True
-
     # ── Notification ──────────────────────────────────────────────────────────
 
-    async def _notify(self, guild_id: int, thread: dict, detect: dict) -> None:
+    async def _notify(self, guild_id: int, thread: dict, detect: ScoreResult) -> None:
         ch_id = self._get(guild_id, "notify_channel_id")
         if not ch_id:
             return
@@ -246,8 +215,8 @@ class HypixelMonitorCog(fluxer.Cog):
         if not channel:
             return
 
-        score = detect["score"]
-        if detect["immediate"]:
+        score = detect.score
+        if detect.immediate:
             confidence, color = "🔴 HIGH (Immediate)", _C_RED
         elif score >= 6.0:
             confidence, color = "🟠 HIGH",   _C_ORANGE
@@ -269,23 +238,22 @@ class HypixelMonitorCog(fluxer.Cog):
         )
 
         for tier in ("higher", "normal"):
-            vals = detect["matches"].get(tier, [])
+            vals = detect.matches.get(tier, [])
             if vals:
                 embed.add_field(
                     name=f"{tier.title()} Keywords",
                     value=", ".join(vals[:6]) + ("…" if len(vals) > 6 else ""),
                     inline=False,
                 )
-        if detect["matches"].get("negative"):
+        if detect.matches.get("negative"):
             embed.add_field(
                 name="⚠️ Negative Indicators",
-                value=", ".join(detect["matches"]["negative"][:4]),
+                value=", ".join(detect.matches["negative"][:4]),
                 inline=False,
             )
 
         embed.set_footer(text=f"by {thread.get('author', '?')} • Hypixel Forums")
 
-        # Attach thread URL as the embed link
         if thread.get("url"):
             embed.url = thread["url"]
 
@@ -511,7 +479,6 @@ class HypixelMonitorCog(fluxer.Cog):
             await self._reply(ctx, embed=self._help_embed())
             return
 
-        # Owner-only
         if sub == "cleartasks":
             if str(ctx.author.id) != str(getattr(config, "OWNER_ID", "")):
                 await ctx.reply(content="This command is bot-owner only.")
@@ -738,15 +705,15 @@ class HypixelMonitorCog(fluxer.Cog):
         kw     = self._get(ctx.guild_id, "keywords") or deepcopy(DEFAULT_KEYWORDS)
         detect = self._score_text(title.strip(), body.strip(), kw)
         lines  = [
-            f"**Immediate**: {detect['immediate']}",
-            f"**Score**: {detect['score']}  (context boost: +{detect['context_boost']})",
+            f"**Immediate**: {detect.immediate}",
+            f"**Score**: {detect.score}  (context boost: +{detect.context_boost})",
             "**Matches by tier:**",
         ]
-        for tier, vals in detect["matches"].items():
+        for tier, vals in detect.matches.items():
             lines.append(f"  {tier}: {', '.join(vals) if vals else '*(none)*'}")
-        if detect["breakdown"]:
+        if detect.breakdown:
             lines.append("**Scoring breakdown (first 15):**")
-            for kw_name, (tier, pts) in list(detect["breakdown"].items())[:15]:
+            for kw_name, (tier, pts) in list(detect.breakdown.items())[:15]:
                 lines.append(f"  `{kw_name}` [{tier}] → {pts:+.1f}")
         await ctx.reply(content="\n".join(lines))
 
@@ -789,10 +756,10 @@ class HypixelMonitorCog(fluxer.Cog):
                     detect = self._score_text(thread["title"], thread["content"], kw)
                     would_notify = self._should_notify(thread, detect, ctx.guild_id)
                     top_kws = ", ".join(
-                        (detect["matches"].get("higher") or [])[:2] +
-                        (detect["matches"].get("normal") or [])[:3]
+                        (detect.matches.get("higher") or [])[:2] +
+                        (detect.matches.get("normal") or [])[:3]
                     ) or "—"
-                    rows.append((thread["title"][:48], detect["score"], "✓" if would_notify else "✗", top_kws[:30]))
+                    rows.append((thread["title"][:48], detect.score, "✓" if would_notify else "✗", top_kws[:30]))
 
             header = f"{'Title':<50} {'Score':<6} {'Notify':<7} Top keywords\n" + "─" * 85
             body_t = "\n".join(f"{t:<50} {s:<6.1f} {n:<7} {k}" for t, s, n, k in rows)
@@ -1006,7 +973,6 @@ class HypixelMonitorCog(fluxer.Cog):
         await self._send_pages(ctx, f"```json\n{data}\n```")
 
     async def _kw_import(self, ctx: fluxer.Message, arg: str) -> None:
-        """Import from JSON text. Usage: !hmonitor keyword import [merge] <json>"""
         parts = arg.strip().split(None, 1)
         merge = False
         if parts and parts[0].lower() in ("true", "merge"):
