@@ -635,16 +635,15 @@ class ModrinthCog(fluxer.Cog):
             cid = entry.get("channel_id")
             by_channel.setdefault(cid, []).append((pid, entry))
 
-        # Build all fields first
-        all_fields: list[tuple[str, str]] = []  # (name, value)
+        # Build all fields
+        all_fields: list[tuple[str, str]] = []
         for channel_id, entries in sorted(by_channel.items(), key=lambda x: x[0]):
             lines = []
             for pid, entry in sorted(entries, key=lambda x: x[1].get("project_name", "").lower()):
                 loader = entry.get("loader") or "any"
                 mc = ", ".join(entry.get("mc_versions") or []) or "any"
                 lines.append(f"• **{entry.get('project_name', pid)}** · loader: `{loader}` · mc: `{mc}`")
-            channel_label = f"<#{channel_id}> ({len(entries)} mod{'s' if len(entries) != 1 else ''})"
-            # Chunk lines into ≤1024-char field values
+            channel_label = f"#{self._channel_name(channel_id)} ({len(entries)} mod{'s' if len(entries) != 1 else ''})"
             current = ""
             first = True
             for line in lines:
@@ -661,10 +660,9 @@ class ModrinthCog(fluxer.Cog):
         default_loader = data.get("default_loader")
         footer = f"Server default loader: {default_loader}" if default_loader else None
 
-        # Send in batches of 25 fields per embed
-        batch_size = 25
-        batches = [all_fields[i:i + batch_size] for i in range(0, len(all_fields), batch_size)]
-        first_message = True
+        batches = [all_fields[i:i + 25] for i in range(0, len(all_fields), 25)]
+        src_channel = self.bot._channels.get(ctx.channel_id)
+
         for i, batch in enumerate(batches):
             embed = fluxer.Embed(
                 title=f"Tracked Mods — {len(tracked)} total" if i == 0 else f"Tracked Mods (cont. {i + 1})",
@@ -675,11 +673,12 @@ class ModrinthCog(fluxer.Cog):
             if i == len(batches) - 1 and footer:
                 embed.set_footer(text=footer)
 
-            if first_message:
+            if i == 0:
                 await ctx.reply(content=" ", embed=embed)
-                first_message = False
+            elif src_channel:
+                await src_channel.send(content=" ", embed=embed)
             else:
-                await ctx.send_to_channel(self.channel_id, content=" ", embed=embed)
+                await ctx.reply(content=" ", embed=embed)
 
     async def _cmd_check(self, ctx: fluxer.Message, args: list[str] = None) -> None:
         await ctx.reply(content="🔍 Running manual update check…")
