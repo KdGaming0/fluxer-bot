@@ -3,9 +3,6 @@ cogs/welcome.py
 ---------------
 Greets new members with a rich embed.
 
-Setup (run once after adding the bot to your server):
-    !setwelcome #your-channel-name
-
 Commands:
     !setwelcome #channel          - Set the welcome channel
     !setwelcome                   - Clear the welcome channel
@@ -38,15 +35,7 @@ class WelcomeCog(fluxer.Cog):
 
     @fluxer.Cog.command(name="setwelcome")
     async def setwelcome(self, ctx: fluxer.Message) -> None:
-        """Main setwelcome command — dispatches subcommands or sets the channel.
-
-        Usage:
-            !setwelcome #channel       - Set welcome channel
-            !setwelcome                - Clear welcome channel
-            !setwelcome msg <text>     - Set custom welcome message
-            !setwelcome msg            - Reset to default message
-            !setwelcome preview        - Preview current welcome message
-        """
+        """Main setwelcome command — dispatches subcommands or sets the channel."""
         if ctx.guild_id is None:
             await ctx.reply("This command can only be used inside a server.")
             return
@@ -55,23 +44,16 @@ class WelcomeCog(fluxer.Cog):
         raw = ctx.content.strip()
         args_str = raw[len(prefix_cmd):].strip()
 
-        # Split into tokens: first token may be a subcommand
         tokens = args_str.split(None, 1)
         first = tokens[0].lower() if tokens else ""
 
-        # ── Subcommand: preview ───────────────────────────────────────────
         if first == "preview":
             await self._subcmd_preview(ctx)
-            return
-
-        # ── Subcommand: msg ───────────────────────────────────────────────
-        if first == "msg":
+        elif first == "msg":
             message_text = tokens[1].strip() if len(tokens) > 1 else ""
             await self._subcmd_msg(ctx, message_text)
-            return
-
-        # ── Default: set or clear channel ─────────────────────────────────
-        await self._subcmd_channel(ctx, args_str)
+        else:
+            await self._subcmd_channel(ctx, args_str)
 
     # ── Subcommand handlers ───────────────────────────────────────────────────
 
@@ -145,10 +127,13 @@ class WelcomeCog(fluxer.Cog):
         await ctx.reply(embed=embed)
 
     async def _subcmd_preview(self, ctx: fluxer.Message) -> None:
-        """Preview the current welcome message."""
+        """Preview the current welcome message using the caller as the test user."""
+        # Guild name: Guild.name is str | None — fall back safely
         guild = self.bot._guilds.get(ctx.guild_id)
-        guild_name = guild.name if guild else "the server"
-        member_count = len(guild.members) if guild and hasattr(guild, "members") else "?"
+        guild_name = str(guild) if guild else "the server"  # Guild.__str__ returns name or "Guild(id)"
+
+        # Member count: Guild has member_count: int | None, NOT a .members list
+        member_count = guild.member_count if guild and guild.member_count is not None else "?"
 
         template = self.settings.get(ctx.guild_id, "welcome_message") or DEFAULT_MESSAGE
         description = self._format_message(template, ctx.author, guild_name, member_count)
@@ -185,8 +170,8 @@ class WelcomeCog(fluxer.Cog):
             return
 
         guild = self.bot._guilds.get(guild_id)
-        guild_name = guild.name if guild else "the server"
-        member_count = len(guild.members) if guild and hasattr(guild, "members") else "?"
+        guild_name = str(guild) if guild else "the server"
+        member_count = guild.member_count if guild and guild.member_count is not None else "?"
 
         template = self.settings.get(guild_id, "welcome_message") or DEFAULT_MESSAGE
         description = self._format_message(template, member.user, guild_name, member_count)
@@ -218,13 +203,13 @@ class WelcomeCog(fluxer.Cog):
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _format_message(self, template: str, user, guild_name: str, member_count) -> str:
-        display = getattr(user, "global_name", None) or getattr(user, "username", str(user))
-        mention = f"<@{user.id}>" if hasattr(user, "id") else display
+        display = user.display_name  # User.display_name: global_name → username
+        mention = user.mention       # User.mention: "<@{id}>"
         return (
             template
             .replace("{user}", mention)
             .replace("{name}", display)
-            .replace("{server}", guild_name)
+            .replace("{server}", str(guild_name))
             .replace("{count}", str(member_count))
         )
 
