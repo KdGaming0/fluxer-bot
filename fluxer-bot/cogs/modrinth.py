@@ -233,15 +233,8 @@ class ModrinthCog(fluxer.Cog):
 
     @staticmethod
     async def _reply(ctx: fluxer.Message, text: str = "", embed: fluxer.Embed | None = None) -> None:
-        """
-        Wrapper around ctx.reply() that ensures content is never None/empty.
-
-        Root cause: fluxer's send_message HTTP call rejects requests where
-        content is None or omitted entirely when an embed is present — it
-        requires content to be at least an empty string in the JSON payload.
-        """
         if embed is not None:
-            await ctx.reply(content=text, embed=embed)
+            await ctx.reply(content=text or "\u200b", embed=embed)
         else:
             await ctx.reply(content=text)
 
