@@ -418,21 +418,18 @@ class RolesCog(fluxer.Cog):
     # =========================================================================
 
     @fluxer.Cog.listener()
-    async def on_reaction_add(self, data: dict) -> None:
+    async def on_raw_reaction_add(self, event: fluxer.RawReactionActionEvent) -> None:
         """Assign a role when a user adds a reaction to a reaction-role message."""
-        user_id = data.get("user_id")
-        guild_id = data.get("guild_id")
-        message_id = str(data.get("message_id", ""))
-        emoji_data = data.get("emoji", {})
-        emoji = emoji_data.get("name", "")  # Works for both unicode and custom emoji names
-
         # Ignore bot reactions
-        if data.get("member", {}).get("user", {}).get("bot"):
+        if event.user_id == self.bot.user.id:
             return
-        if guild_id is None:
+        if event.guild_id is None:
             return
 
-        rr_data: dict = self.settings.get(guild_id, "reaction_roles") or {}
+        message_id = str(event.message_id)
+        emoji = str(event.emoji)  # PartialEmoji.__str__() gives us the right format
+
+        rr_data: dict = self.settings.get(event.guild_id, "reaction_roles") or {}
         if message_id not in rr_data:
             return
 
@@ -441,32 +438,27 @@ class RolesCog(fluxer.Cog):
         if role_id is None:
             return
 
-        guild = self.bot._guilds.get(guild_id)
-        if guild is None:
-            return
-
         try:
-            await guild.add_role(user_id, role_id)
+            await self.bot._http.add_guild_member_role(
+                event.guild_id, event.user_id, role_id
+            )
             log.debug(
                 "Assigned role %d to user %d via reaction %s in guild %d",
-                role_id, user_id, emoji, guild_id,
+                role_id, event.user_id, emoji, event.guild_id,
             )
         except Exception as exc:
-            log.warning("Failed to assign role %d to user %d: %s", role_id, user_id, exc)
+            log.warning("Failed to assign role %d to user %d: %s", role_id, event.user_id, exc)
 
     @fluxer.Cog.listener()
-    async def on_reaction_remove(self, data: dict) -> None:
+    async def on_raw_reaction_remove(self, event: fluxer.RawReactionActionEvent) -> None:
         """Remove a role when a user removes their reaction from a reaction-role message."""
-        user_id = data.get("user_id")
-        guild_id = data.get("guild_id")
-        message_id = str(data.get("message_id", ""))
-        emoji_data = data.get("emoji", {})
-        emoji = emoji_data.get("name", "")
-
-        if guild_id is None:
+        if event.guild_id is None:
             return
 
-        rr_data: dict = self.settings.get(guild_id, "reaction_roles") or {}
+        message_id = str(event.message_id)
+        emoji = str(event.emoji)
+
+        rr_data: dict = self.settings.get(event.guild_id, "reaction_roles") or {}
         if message_id not in rr_data:
             return
 
@@ -475,18 +467,16 @@ class RolesCog(fluxer.Cog):
         if role_id is None:
             return
 
-        guild = self.bot._guilds.get(guild_id)
-        if guild is None:
-            return
-
         try:
-            await guild.remove_role(user_id, role_id)
+            await self.bot._http.remove_guild_member_role(
+                event.guild_id, event.user_id, role_id
+            )
             log.debug(
                 "Removed role %d from user %d via reaction %s in guild %d",
-                role_id, user_id, emoji, guild_id,
+                role_id, event.user_id, emoji, event.guild_id,
             )
         except Exception as exc:
-            log.warning("Failed to remove role %d from user %d: %s", role_id, user_id, exc)
+            log.warning("Failed to remove role %d from user %d: %s", role_id, event.user_id, exc)
 
     # =========================================================================
     # Helpers
