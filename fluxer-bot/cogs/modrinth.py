@@ -649,7 +649,7 @@ class ModrinthCog(fluxer.Cog):
         if default_loader:
             lines.append(f"_Server default loader: {default_loader}_")
 
-        # Split into ≤1900-char messages
+        # Split into ≤1900-char chunks
         messages: list[str] = []
         current = ""
         for line in lines:
@@ -662,11 +662,10 @@ class ModrinthCog(fluxer.Cog):
         if current:
             messages.append(current)
 
-        for i, msg in enumerate(messages):
-            if i == 0:
-                await ctx.reply(content=msg)
-            else:
-                await ctx.send_to_channel(content=msg)
+        # First chunk is a reply, overflow goes to channel.send
+        await ctx.reply(content=messages[0])
+        for chunk in messages[1:]:
+            await ctx.send_to_channel(ctx.channel_id, content=chunk)
 
     async def _cmd_check(self, ctx: fluxer.Message, args: list[str] = None) -> None:
         await ctx.reply(content="🔍 Running manual update check…")
