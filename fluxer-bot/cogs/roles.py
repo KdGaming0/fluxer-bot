@@ -60,10 +60,13 @@ class RolesCog(fluxer.Cog):
             return False
         return getattr(perms, "manage_roles", False) or getattr(perms, "administrator", False)
 
-    def _bot_can_assign(self, guild, role) -> bool:
+    async def _bot_can_assign(self, guild, role) -> bool:
         """Return True if the bot's highest role is above the target role."""
-        bot_member = guild.get_member(self.bot.user.id) if guild else None
-        if not bot_member:
+        if not guild:
+            return True
+        try:
+            bot_member = await guild.fetch_member(self.bot.user.id)
+        except Exception:
             return True  # Can't verify; attempt anyway
         bot_top = max(
             (r.position for r in getattr(bot_member, "roles", []) if hasattr(r, "position")),
@@ -205,7 +208,7 @@ class RolesCog(fluxer.Cog):
             return
 
         # Safety: bot hierarchy check
-        if not self._bot_can_assign(guild, role):
+        if not await self._bot_can_assign(guild, role):
             await ctx.reply(
                 f"I can't assign **{role.name}** because it's higher than my own highest role.\n"
                 "Move my role above it in Server Settings → Roles first."
