@@ -47,7 +47,10 @@ class WelcomeCog(fluxer.Cog):
             await ctx.reply("This command can only be used inside a server.")
             return
 
-        args = ctx.content.removeprefix(f"{config.COMMAND_PREFIX}setwelcome").strip()
+        raw = ctx.content.strip()
+        args = raw[len(f"{config.COMMAND_PREFIX}setwelcome"):].strip()
+        if args.startswith("msg"):
+            return
 
         if not args:
             self.settings.delete(ctx.guild_id, "welcome_channel_id")
@@ -108,7 +111,7 @@ class WelcomeCog(fluxer.Cog):
             await ctx.reply("This command can only be used inside a server.")
             return
 
-        args = ctx.content.removeprefix(f"{config.COMMAND_PREFIX}setwelcomemsg").strip()
+        args = ctx.content.strip()[len(f"{config.COMMAND_PREFIX}setwelcomemsg"):].strip()
 
         if not args:
             self.settings.delete(ctx.guild_id, "welcome_message")
