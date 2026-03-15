@@ -107,11 +107,15 @@ class RedditMonitorCog(fluxer.Cog):
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     @fluxer.Cog.listener()
-    async def on_ready(self) -> None:
-        for guild in self.bot.guilds:
-            if self._get(guild.id, "enabled", False):
-                await self._ensure_task(guild)
-        log.info("RedditMonitor ready (%d guild(s))", len(self.bot.guilds))
+    async def on_guild_join(self, guild: fluxer.Guild) -> None:
+        """Called for every guild on connect (GUILD_CREATE) and when joining new ones.
+
+        on_ready fires before guild data arrives, so we use on_guild_join instead —
+        the gateway sends one GUILD_CREATE per guild immediately after READY.
+        """
+        if self._get(guild.id, "enabled", False):
+            await self._ensure_task(guild)
+            log.info("RedditMonitor resuming task for guild %d (%s)", guild.id, guild)
 
     async def cog_unload(self) -> None:
         log.info("Shutting down RedditMonitor…")

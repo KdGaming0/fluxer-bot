@@ -27,8 +27,12 @@ bot = fluxer.Bot(
 @bot.event
 async def on_ready() -> None:
     log.info("Logged in as %s", bot.user)
-    log.info("Connected to %d guild(s)", len(bot.guilds))
     log.info("Command prefix: %s", config.COMMAND_PREFIX)
+
+@bot.event
+async def on_guild_join(guild: fluxer.Guild) -> None:
+    """Fires for every existing guild on connect, and for new guilds joined at runtime."""
+    log.info("Guild available: %s (%d) — total: %d", guild, guild.id, len(bot.guilds))
 
 
 # ── Cog auto-loader ───────────────────────────────────────────────────────────
