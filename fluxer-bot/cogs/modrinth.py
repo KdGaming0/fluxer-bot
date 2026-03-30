@@ -83,6 +83,11 @@ _VALID_LOADERS = frozenset({
     "liteloader", "modloader", "rift", "minecraft",
 })
 
+_IMG_MARKDOWN_RE = re.compile(r'!\[.*?\]\(.*?\)', re.DOTALL)
+_BARE_IMG_URL_RE = re.compile(
+    r'https?://\S+\.(?:png|jpg|jpeg|gif|webp|svg)\S*', re.IGNORECASE
+)
+
 
 # ---------------------------------------------------------------------------
 # Modrinth API helpers
@@ -257,7 +262,14 @@ def _build_update_embed(project: dict, version: dict) -> fluxer.Embed:
     else:
         mc_str = ", ".join(mc) or "—"
 
-    changelog = (version.get("changelog") or "").strip()
+    def _sanitize_changelog(text: str) -> str:
+        """Strip image markdown and bare image URLs that Discord may render unexpectedly."""
+        text = _IMG_MARKDOWN_RE.sub('', text)
+        text = _BARE_IMG_URL_RE.sub('', text)
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        return text.strip()
+
+    changelog = _sanitize_changelog((version.get("changelog") or "").strip())
     if len(changelog) > 900:
         changelog = changelog[:900] + f"…\n\n[View full changelog]({url})"
 

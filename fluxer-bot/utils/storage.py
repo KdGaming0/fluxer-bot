@@ -44,10 +44,22 @@ _DATA_FILE = os.path.join(_DATA_DIR, "guild_settings.json")
 class GuildSettings:
     """Thread-safe (single-process) persistent key-value store per guild."""
 
+    _instance: 'GuildSettings | None' = None
+
     def __init__(self) -> None:
+        if getattr(self, '_initialized', False):
+            return
+        self._initialized = True
         os.makedirs(_DATA_DIR, exist_ok=True)
         self._data: dict[str, dict[str, Any]] = {}
         self._load()
+
+    def __new__(cls) -> 'GuildSettings':
+        if cls._instance is None:
+            instance = super().__new__(cls)
+            instance._initialized = False
+            cls._instance = instance
+        return cls._instance
 
     # ── Private ───────────────────────────────────────────────────────────────
 
