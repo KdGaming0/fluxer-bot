@@ -1,75 +1,141 @@
+"""
+bot.py
+------
+Master launcher.
+
+Reads which tokens are set, prints invite links for every configured
+platform, then starts each bot as an independent sub-process:
+
+    run_fluxer.py   — uses the real fluxer package
+    run_discord.py  — installs the fluxer shim first, then loads the same cogs
+
+Running them as separate processes keeps their ``sys.modules`` caches
+completely independent, which is required for the shim to work correctly.
+
+Usage
+-----
+    python bot.py
+
+Both bots' stdout/stderr are streamed to this console, prefixed with
+[Fluxer] or [Discord] so you can tell them apart.
+
+Environment variables
+---------------------
+    FLUXER_TOKEN       — Fluxer bot token
+    DISCORD_TOKEN      — Discord bot token
+    FLUXER_CLIENT_ID   — Fluxer application client ID  (for invite link)
+    DISCORD_CLIENT_ID  — Discord application client ID (for invite link)
+    COMMAND_PREFIX     — command prefix (default: !)
+"""
+
 import asyncio
 import logging
-import os
 import sys
+import os
 
-import fluxer
 import config
 
-# ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
-log = logging.getLogger("bot")
+log = logging.getLogger("launcher")
 
-# ── Bot instance ──────────────────────────────────────────────────────────────
-intents = fluxer.Intents.all()
-
-bot = fluxer.Bot(
-    command_prefix=config.COMMAND_PREFIX,
-    intents=intents,
+# ── Permission integer used for the Discord invite link ───────────────────────
+# Covers everything this bot needs.  Adjust after you know your exact needs.
+_DISCORD_PERMISSIONS = (
+    0x00000002   # kick_members
+    | 0x00000004   # ban_members
+    | 0x00000010   # manage_channels
+    | 0x00000020   # manage_guild
+    | 0x00000040   # add_reactions
+    | 0x00000400   # view_channel
+    | 0x00000800   # send_messages
+    | 0x00002000   # manage_messages
+    | 0x00004000   # embed_links
+    | 0x00010000   # read_message_history
+    | 0x10000000   # manage_roles
+    | 0x10000000000  # moderate_members (timeout)
 )
 
 
-# ── Events ────────────────────────────────────────────────────────────────────
-@bot.event
-async def on_ready() -> None:
-    log.info("Logged in as %s", bot.user)
-    log.info("Command prefix: %s", config.COMMAND_PREFIX)
-
-@bot.event
-async def on_guild_join(guild: fluxer.Guild) -> None:
-    """Fires for every existing guild on connect, and for new guilds joined at runtime."""
-    log.info("Guild available: %s (%d) — total: %d", guild, guild.id, len(bot.guilds))
-
-
-# ── Cog auto-loader ───────────────────────────────────────────────────────────
-async def load_cogs() -> None:
-    """Discover and load every module inside the cogs/ directory.
-
-    Each cog file must expose an  async def setup(bot)  function that adds
-    its cog(s) to the bot.  To disable a cog temporarily, prefix its file
-    with an underscore (e.g. _welcome.py) — it will be skipped.
-    """
-    cogs_dir = os.path.join(os.path.dirname(__file__), "cogs")
-
-    for filename in sorted(os.listdir(cogs_dir)):
-        if not filename.endswith(".py"):
-            continue
-        if filename.startswith("_"):
-            continue
-
-        module_name = f"cogs.{filename[:-3]}"  # e.g. "cogs.welcome"
-        try:
-            await bot.load_extension(module_name)
-            log.info("Loaded cog: %s", module_name)
-        except Exception:
-            log.exception("Failed to load cog: %s", module_name)
-
-
-# ── Entry point ───────────────────────────────────────────────────────────────
-async def main() -> None:
-    if not config.BOT_TOKEN:
-        log.error(
-            "BOT_TOKEN environment variable is not set. "
-            "Export it before running the bot."
+def _print_invite_links() -> None:
+    """Log invite URLs for every configured platform."""
+    if config.FLUXER_CLIENT_ID:
+        log.info(
+            "┌─ Fluxer invite ──────────────────────────────────────────────────"
         )
-        sys.exit(1)
+        log.info(
+            "│  https://fluxer.gg/oauth2/authorize"
+            "?client_id=%s&permissions=8&scope=bot",
+            config.FLUXER_CLIENT_ID,
+        )
+        log.info("└──────────────────────────────────────────────────────────────────")
+    else:
+        log.warning("FLUXER_CLIENT_ID not set — Fluxer invite link unavailable.")
 
-    await load_cogs()
-    await bot.start(config.BOT_TOKEN)
+    if config.DISCORD_CLIENT_ID:
+        log.info(
+            "┌─ Discord invite ─────────────────────────────────────────────────"
+        )
+        log.info(
+            "│  https://discord.com/api/oauth2/authorize"
+            "?client_id=%s&permissions=%d&scope=bot",
+            config.DISCORD_CLIENT_ID,
+            _DISCORD_PERMISSIONS,
+        )
+        log.info("└──────────────────────────────────────────────────────────────────")
+    else:
+        log.warning("DISCORD_CLIENT_ID not set — Discord invite link unavailable.")
+
+
+async def _stream_process(proc: asyncio.subprocess.Process, prefix: str) -> None:
+    """Read and print all output from a sub-process."""
+    while True:
+        line = await proc.stdout.readline()
+        if not line:
+            break
+        print(f"{prefix} {line.decode(errors='replace')}", end="")
+    await proc.wait()
+
+
+async def _run_bot(script: str, prefix: str) -> None:
+    """Start a bot sub-process and stream its output until it exits."""
+    log.info("Starting %s (script: %s)", prefix.strip("[]"), script)
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        os.path.join(os.path.dirname(__file__), script),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    await _stream_process(proc, prefix)
+    log.warning("%s process exited (code %s).", prefix.strip("[]"), proc.returncode)
+
+
+async def main() -> None:
+    _print_invite_links()
+
+    tasks = []
+
+    if config.FLUXER_TOKEN:
+        tasks.append(_run_bot("run_fluxer.py", "[Fluxer] "))
+    else:
+        log.warning("FLUXER_TOKEN not set — Fluxer bot will not start.")
+
+    if config.DISCORD_TOKEN:
+        tasks.append(_run_bot("run_discord.py", "[Discord]"))
+    else:
+        log.warning("DISCORD_TOKEN not set — Discord bot will not start.")
+
+    if not tasks:
+        log.error(
+            "No bot tokens configured.  "
+            "Set FLUXER_TOKEN and/or DISCORD_TOKEN and try again."
+        )
+        return
+
+    await asyncio.gather(*tasks)
 
 
 if __name__ == "__main__":
