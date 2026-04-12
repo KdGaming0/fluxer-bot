@@ -29,6 +29,8 @@ logging.basicConfig(
     format="%(asctime)s  %(levelname)-8s  %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+# Show debug output from the utility cog so tag/command dispatch is visible
+logging.getLogger("cog.utility").setLevel(logging.DEBUG)
 log = logging.getLogger("discord_bot")
 
 # ── Bot instance ──────────────────────────────────────────────────────────────

@@ -212,9 +212,14 @@ class UtilityCog(fluxer.Cog):
     @fluxer.Cog.listener()
     async def on_message(self, message: fluxer.Message) -> None:
         """Check every message to see if it calls a tag by name."""
+        log.debug("on_message fired: guild=%s author=%s content=%r",
+                  message.guild_id, message.author.username, message.content)
+
         if message.author.bot:
+            log.debug("on_message: ignoring bot message")
             return
         if message.guild_id is None:
+            log.debug("on_message: ignoring DM")
             return
         if not message.content.startswith(config.COMMAND_PREFIX):
             return
@@ -222,24 +227,28 @@ class UtilityCog(fluxer.Cog):
         # Strip prefix and grab the first word as the potential tag name
         body = message.content[len(config.COMMAND_PREFIX):].strip()
         name = body.split()[0].lower() if body.split() else ""
+        log.debug("on_message: prefix matched, name=%r", name)
 
         if not name:
             return
 
         # Only fire if it's NOT already a registered bot command
         if name in self.bot._commands:
+            log.debug("on_message: '%s' is a real command, delegating to process_commands", name)
             if hasattr(self.bot, "process_commands"):
                 await self.bot.process_commands(message._msg)
             return
 
         tags: dict = self.settings.get(message.guild_id, "tags") or {}
+        log.debug("on_message: tags in guild=%s", list(tags.keys()))
         if name not in tags:
+            log.debug("on_message: '%s' not a tag, delegating to process_commands", name)
             if hasattr(self.bot, "process_commands"):
                 await self.bot.process_commands(message._msg)
             return
 
         await message.reply(tags[name]["text"])
-        log.debug("Tag '%s' triggered in guild %d", name, message.guild_id)
+        log.info("Tag '%s' triggered in guild %d", name, message.guild_id)
 
     # =========================================================================
     # General commands
