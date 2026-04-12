@@ -781,12 +781,24 @@ class ModrinthCog(fluxer.Cog):
             for pid, entry in sorted(entries, key=lambda x: x[1].get("project_name", "").lower()):
                 loader = entry.get("loader") or "any"
                 mc     = ", ".join(entry.get("mc_versions") or []) or "any"
-                lines.append(f"  • **{entry.get('project_name', pid)}** · loader: `{loader}` · mc: `{mc}`")
+                lines.append(
+                    f"  • **{entry.get('project_name', pid)}** `{pid}`"
+                    f" · loader: `{loader}` · mc: `{mc}`"
+                )
             lines.append("")
 
         default_loader = data.get("default_loader")
         if default_loader:
             lines.append(f"_Server default loader: {default_loader}_")
+
+        # ── Bulk-add helper block ──────────────────────────────────────────────
+        # One code block per channel so you can paste the IDs straight into
+        # `!track bulk #channel ... -- <ids>` on another server.
+        lines.append("\n**Project IDs by channel** _(for `!track bulk`)_")
+        for channel_id, entries in sorted(by_channel.items(), key=lambda x: x[0]):
+            ids_line = " ".join(pid for pid, _ in sorted(entries, key=lambda x: x[1].get("project_name", "").lower()))
+            lines.append(f"<#{channel_id}>")
+            lines.append(f"```\n{ids_line}\n```")
 
         messages: list[str] = []
         current = ""
