@@ -288,6 +288,7 @@ class HypixelUpdatesCog(fluxer.Cog):
         if self._task and not self._task.done():
             return
         self._session = aiohttp.ClientSession()
+        await self._seed_all_guilds()
         self._task = asyncio.create_task(self._poll_loop())
         log.info("HypixelUpdates checker started (default interval %ds)", DEFAULT_INTERVAL)
 
@@ -303,6 +304,55 @@ class HypixelUpdatesCog(fluxer.Cog):
         log.info("HypixelUpdates checker stopped.")
 
     # ── Background loop ───────────────────────────────────────────────────────
+
+    # -- Startup seeding ------------------------------------------------------
+
+    async def _seed_all_guilds(self) -> None:
+        """On first boot, silently mark all current threads as seen so we do not
+        spam old posts the moment the bot starts."""
+        for guild in self.bot.guilds:
+            try:
+                await self._seed_guild(guild.id)
+            except Exception:
+                log.exception("Error seeding guild %d", guild.id)
+
+    async def _seed_guild(self, guild_id: int) -> None:
+        """Scrape current thread listings for every enabled source and record
+        all thread IDs as seen -- without sending any notifications."""
+        data    = self._data(guild_id)
+        enabled = data.get("enabled_sources", {})
+        seen    = data.get("seen_threads", {})
+        seeded  = False
+
+        for source_key, source_cfg in SOURCES.items():
+            if not enabled.get(source_key, True):
+                continue
+
+            source_seen = seen.setdefault(source_key, {})
+            # Only seed sources that have no history yet
+            if source_seen:
+                continue
+
+            await asyncio.sleep(2)
+            listing_html = await _fetch_html(self._session, source_cfg["url"])
+            if not listing_html:
+                continue
+
+            threads = _parse_thread_list(listing_html, source_cfg)
+            for thread in threads:
+                tid = thread["thread_id"]
+                if tid not in source_seen:
+                    source_seen[tid] = {"hash": "", "is_sticky": thread["is_sticky"]}
+
+            log.info(
+                "Seeded %d thread(s) for source '%s' in guild %d (no notifications sent)",
+                len(threads), source_key, guild_id,
+            )
+            seeded = True
+
+        if seeded:
+            data["seen_threads"] = seen
+            self._save(guild_id, data)
 
     async def _poll_loop(self) -> None:
         while True:
