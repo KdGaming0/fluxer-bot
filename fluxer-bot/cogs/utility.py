@@ -5,11 +5,11 @@ General-purpose utility commands.
 
 Commands:
     Tags:
-        !tag add <name> <text>   - Create a tag
-        !tag remove <name>       - Delete a tag
+        !tag add <n> <text>   - Create a tag
+        !tag remove <n>       - Delete a tag
         !tag list                - List all tags in this server
-        !tag info <name>         - Show tag details (author, created date)
-        !<name>                  - Trigger a tag directly by name
+        !tag info <n>         - Show tag details (author, created date)
+        !<n>                  - Trigger a tag directly by name
 
     General:
         !ping                    - Bot latency check
@@ -70,11 +70,11 @@ class UtilityCog(fluxer.Cog):
             embed = fluxer.Embed(
                 title="Tag commands",
                 description=(
-                    f"`{config.COMMAND_PREFIX}tag add <name> <text>` — Create a tag\n"
-                    f"`{config.COMMAND_PREFIX}tag remove <name>` — Delete a tag\n"
+                    f"`{config.COMMAND_PREFIX}tag add <n> <text>` — Create a tag\n"
+                    f"`{config.COMMAND_PREFIX}tag remove <n>` — Delete a tag\n"
                     f"`{config.COMMAND_PREFIX}tag list` — List all tags\n"
-                    f"`{config.COMMAND_PREFIX}tag info <name>` — Tag details\n"
-                    f"`{config.COMMAND_PREFIX}<name>` — Use a tag directly"
+                    f"`{config.COMMAND_PREFIX}tag info <n>` — Tag details\n"
+                    f"`{config.COMMAND_PREFIX}<n>` — Use a tag directly"
                 ),
                 color=_COLOR,
             )
@@ -84,7 +84,7 @@ class UtilityCog(fluxer.Cog):
         # parts = ["add", "name", "text with spaces"]
         if len(parts) < 3:
             await ctx.reply(
-                f"Usage: `{config.COMMAND_PREFIX}tag add <name> <text>`\n"
+                f"Usage: `{config.COMMAND_PREFIX}tag add <n> <text>`\n"
                 f"Example: `{config.COMMAND_PREFIX}tag add rules Read #rules before chatting!`"
             )
             return
@@ -140,7 +140,7 @@ class UtilityCog(fluxer.Cog):
 
     async def _tag_remove(self, ctx: fluxer.Message, parts: list[str]) -> None:
         if len(parts) < 2:
-            await ctx.reply(f"Usage: `{config.COMMAND_PREFIX}tag remove <name>`")
+            await ctx.reply(f"Usage: `{config.COMMAND_PREFIX}tag remove <n>`")
             return
 
         name = parts[1].lower()
@@ -161,7 +161,7 @@ class UtilityCog(fluxer.Cog):
 
         if not tags:
             await ctx.reply(
-                f"No tags yet. Create one with `{config.COMMAND_PREFIX}tag add <name> <text>`."
+                f"No tags yet. Create one with `{config.COMMAND_PREFIX}tag add <n> <text>`."
             )
             return
 
@@ -173,13 +173,13 @@ class UtilityCog(fluxer.Cog):
             title=f"Tags — {len(tags)} total",
             description=tag_list,
             color=_COLOR,
-        ).set_footer(text=f"Use {config.COMMAND_PREFIX}<name> to trigger a tag.")
+        ).set_footer(text=f"Use {config.COMMAND_PREFIX}<n> to trigger a tag.")
 
         await ctx.reply(embed=embed)
 
     async def _tag_info(self, ctx: fluxer.Message, parts: list[str]) -> None:
         if len(parts) < 2:
-            await ctx.reply(f"Usage: `{config.COMMAND_PREFIX}tag info <name>`")
+            await ctx.reply(f"Usage: `{config.COMMAND_PREFIX}tag info <n>`")
             return
 
         name = parts[1].lower()
@@ -232,19 +232,15 @@ class UtilityCog(fluxer.Cog):
         if not name:
             return
 
-        # Only fire if it's NOT already a registered bot command
+        # If it's a real command, do nothing — discord.py dispatches it automatically
         if name in self.bot._commands:
-            log.debug("on_message: '%s' is a real command, delegating to process_commands", name)
-            if hasattr(self.bot, "process_commands"):
-                await self.bot.process_commands(message._msg)
+            log.debug("on_message: '%s' is a real command, skipping", name)
             return
 
         tags: dict = self.settings.get(message.guild_id, "tags") or {}
         log.debug("on_message: tags in guild=%s", list(tags.keys()))
         if name not in tags:
-            log.debug("on_message: '%s' not a tag, delegating to process_commands", name)
-            if hasattr(self.bot, "process_commands"):
-                await self.bot.process_commands(message._msg)
+            log.debug("on_message: '%s' not a tag, skipping", name)
             return
 
         await message.reply(tags[name]["text"])
