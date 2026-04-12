@@ -575,6 +575,7 @@ _shim.Cog                    = _ShimCog
 _shim.Bot                    = DiscordBot
 _shim.Message                = _MessageWrapper          # type-hint target only
 _shim.Embed                  = discord.Embed            # identical API to fluxer.Embed
+_shim.File                   = discord.File             # fluxer.File(fp, filename=...) → discord.File
 _shim.Channel                = _ChannelProxy
 _shim.Guild                  = _GuildProxy
 _shim.GuildMember            = _GuildMemberProxy
