@@ -108,6 +108,7 @@ async def _run_bot(script: str, prefix: str) -> None:
         os.path.join(os.path.dirname(__file__), script),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
+        env=os.environ,
     )
     await _stream_process(proc, prefix)
     log.warning("%s process exited (code %s).", prefix.strip("[]"), proc.returncode)
