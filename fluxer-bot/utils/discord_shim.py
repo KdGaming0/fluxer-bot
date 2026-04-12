@@ -454,6 +454,17 @@ class DiscordBot(commands.Bot):
             self.__http_wrapper = _HttpWrapper(self.http)
         return self.__http_wrapper
 
+    @property
+    def _commands(self) -> dict:
+        """Fluxer-style _commands dict — maps command name → Command object."""
+        return {name: cmd for name, cmd in self.all_commands.items()}
+
+    async def on_command_error(self, ctx, error) -> None:
+        """Suppress CommandNotFound so tag triggers in on_message can handle unknown prefixed words."""
+        if isinstance(error, commands.CommandNotFound):
+            return
+        raise error
+
     async def load_cogs(self) -> None:
         """Auto-discover and load every cog module in the cogs/ directory."""
         import os, logging
