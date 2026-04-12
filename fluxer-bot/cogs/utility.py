@@ -5,26 +5,30 @@ General-purpose utility commands.
 
 Commands:
     Tags:
-        !tag add <n> <text>   - Create a tag
-        !tag remove <n>       - Delete a tag
-        !tag list                - List all tags in this server
-        !tag info <n>         - Show tag details (author, created date)
-        !<n>                  - Trigger a tag directly by name
+        !tag add <name> [caption]  - Create a tag. Attach a WebP/AVIF/GIF/MP4/WebM
+                                     image or video to the message to make a media tag.
+                                     The caption is optional for media tags.
+        !tag remove <name>         - Delete a tag (also removes stored media file)
+        !tag list                  - List all tags in this server
+        !tag info <name>           - Show tag details (author, created date, type)
+        !<name>                    - Trigger a tag directly by name
 
     General:
-        !ping                    - Bot latency check
-        !serverinfo              - Info about this server
-        !userinfo [@user]        - Info about a user (defaults to yourself)
-        !remind <time> <message> - Set a reminder (e.g. !remind 30m Take a break)
-                                   Supports: s (seconds), m (minutes), h (hours)
+        !ping                      - Bot latency check
+        !serverinfo                - Info about this server
+        !userinfo [@user]          - Info about a user (defaults to yourself)
+        !remind <time> <message>   - Set a reminder (e.g. !remind 30m Take a break)
+                                     Supports: s (seconds), m (minutes), h (hours)
 """
 
 import asyncio
 import logging
+import os
 import re
 import time
 from datetime import datetime, timezone
 
+import aiohttp
 import fluxer
 import config
 from utils.storage import GuildSettings
@@ -36,6 +40,38 @@ _COLOR = 0x5865F2
 
 # Maximum number of tags per guild, to prevent abuse
 _MAX_TAGS = 100
+
+# Where media files are stored on disk
+_MEDIA_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "tag_media")
+
+# Attachment extensions that are treated as media tags
+_ALLOWED_MEDIA_EXTS: frozenset[str] = frozenset({
+    # Modern image / animation formats (Discord blog post, March 2025)
+    ".webp", ".avif",
+    # Classic image formats
+    ".png", ".jpg", ".jpeg", ".gif",
+    # Video formats
+    ".mp4", ".webm", ".mov",
+})
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _media_path(guild_id: int, tag_name: str, ext: str) -> str:
+    """Return the absolute path where a tag's media file should be stored."""
+    guild_dir = os.path.join(_MEDIA_DIR, str(guild_id))
+    os.makedirs(guild_dir, exist_ok=True)
+    return os.path.join(guild_dir, f"{tag_name}{ext}")
+
+
+async def _download_to_disk(url: str, dest_path: str) -> None:
+    """Download *url* and write the bytes to *dest_path*."""
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            resp.raise_for_status()
+            with open(dest_path, "wb") as f:
+                async for chunk in resp.content.iter_chunked(1024 * 64):
+                    f.write(chunk)
 
 
 class UtilityCog(fluxer.Cog):
@@ -70,29 +106,58 @@ class UtilityCog(fluxer.Cog):
             embed = fluxer.Embed(
                 title="Tag commands",
                 description=(
-                    f"`{config.COMMAND_PREFIX}tag add <n> <text>` — Create a tag\n"
-                    f"`{config.COMMAND_PREFIX}tag remove <n>` — Delete a tag\n"
+                    f"`{config.COMMAND_PREFIX}tag add <name> [caption]` — Create a tag\n"
+                    f"  • Attach a WebP/AVIF/GIF/MP4/WebM file to make a **media tag**\n"
+                    f"  • Or just provide text for a plain **text tag**\n"
+                    f"`{config.COMMAND_PREFIX}tag remove <name>` — Delete a tag\n"
                     f"`{config.COMMAND_PREFIX}tag list` — List all tags\n"
-                    f"`{config.COMMAND_PREFIX}tag info <n>` — Tag details\n"
-                    f"`{config.COMMAND_PREFIX}<n>` — Use a tag directly"
+                    f"`{config.COMMAND_PREFIX}tag info <name>` — Tag details\n"
+                    f"`{config.COMMAND_PREFIX}<name>` — Use a tag directly"
                 ),
                 color=_COLOR,
             )
             await ctx.reply(embed=embed)
 
     async def _tag_add(self, ctx: fluxer.Message, parts: list[str]) -> None:
-        # parts = ["add", "name", "text with spaces"]
-        if len(parts) < 3:
+        """
+        Create a tag.
+
+        Text tag:   !tag add <name> <text>
+        Media tag:  !tag add <name> [optional caption]  + attached file
+        """
+        # ── Validate we have at least a name ─────────────────────────────────
+        # parts = ["add", "name", ...]  — need at least index 1
+        has_name = len(parts) >= 2
+
+        # Grab the raw attachments list from the underlying message object.
+        # _MessageWrapper.__getattr__ falls through to the discord.Message /
+        # fluxer.Message so .attachments is always available.
+        attachments = getattr(ctx, "attachments", []) or []
+        has_attachment = bool(attachments)
+
+        if not has_name:
             await ctx.reply(
-                f"Usage: `{config.COMMAND_PREFIX}tag add <n> <text>`\n"
+                f"Usage: `{config.COMMAND_PREFIX}tag add <name> [caption]`\n"
+                f"For a media tag, attach a file (WebP, AVIF, GIF, MP4, WebM, …) "
+                f"to the same message.\n"
+                f"Example: `{config.COMMAND_PREFIX}tag add myclip` ← with an attachment\n"
+                f"Example: `{config.COMMAND_PREFIX}tag add rules Read the rules channel!`"
+            )
+            return
+
+        # If there's no attachment and no text either, bail out
+        if not has_attachment and len(parts) < 3:
+            await ctx.reply(
+                f"Usage: `{config.COMMAND_PREFIX}tag add <name> <text>`\n"
+                f"To make a media tag, attach a file to the same message.\n"
                 f"Example: `{config.COMMAND_PREFIX}tag add rules Read #rules before chatting!`"
             )
             return
 
         name = parts[1].lower()
-        text = parts[2]
+        caption = parts[2].strip() if len(parts) >= 3 else ""
 
-        # Validate name — letters, digits, hyphens only, max 32 chars
+        # ── Validate name ────────────────────────────────────────────────────
         if not re.fullmatch(r"[a-z0-9\-]{1,32}", name):
             await ctx.reply(
                 "Tag names can only contain lowercase letters, digits, and hyphens, "
@@ -118,29 +183,102 @@ class UtilityCog(fluxer.Cog):
             await ctx.reply(f"This server has reached the maximum of {_MAX_TAGS} tags.")
             return
 
-        tags[name] = {
-            "text": text,
-            "author_id": ctx.author.id,
-            "author_name": ctx.author.display_name,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-        self.settings.set(ctx.guild_id, "tags", tags)
-        log.info("Tag '%s' created in guild %d by %s", name, ctx.guild_id, ctx.author.username)
+        # ── Branch: media tag vs text tag ────────────────────────────────────
+        if has_attachment:
+            attachment = attachments[0]
 
-        await ctx.reply(
-            embed=fluxer.Embed(
-                title="Tag created",
-                description=(
-                    f"Tag **{name}** is ready.\n"
-                    f"Use it with `{config.COMMAND_PREFIX}{name}`."
-                ),
-                color=_COLOR,
+            # attachment.filename exists on both discord.py (Attachment.filename)
+            # and Fluxer (mirrors the same attribute name)
+            original_filename: str = getattr(attachment, "filename", "") or ""
+            _, ext = os.path.splitext(original_filename.lower())
+
+            if ext not in _ALLOWED_MEDIA_EXTS:
+                allowed = ", ".join(sorted(_ALLOWED_MEDIA_EXTS))
+                await ctx.reply(
+                    f"Unsupported file type `{ext or '(none)'}`. "
+                    f"Allowed: {allowed}"
+                )
+                return
+
+            # Attachment URL: discord.py → attachment.url; Fluxer → same
+            attachment_url: str = getattr(attachment, "url", "") or ""
+            if not attachment_url:
+                await ctx.reply("Could not read the attachment URL. Please try again.")
+                return
+
+            dest_path = _media_path(ctx.guild_id, name, ext)
+
+            try:
+                await _download_to_disk(attachment_url, dest_path)
+            except Exception as exc:
+                log.exception("Failed to download attachment for tag '%s': %s", name, exc)
+                await ctx.reply(
+                    f"Failed to download the attachment: `{exc}`\n"
+                    f"The file has not been saved."
+                )
+                return
+
+            tags[name] = {
+                "type": "media",
+                "media_path": dest_path,
+                "filename": f"{name}{ext}",  # clean name for re-upload
+                "caption": caption,
+                "author_id": ctx.author.id,
+                "author_name": ctx.author.display_name,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            self.settings.set(ctx.guild_id, "tags", tags)
+            log.info(
+                "Media tag '%s' created in guild %d by %s (file: %s)",
+                name, ctx.guild_id, ctx.author.username, dest_path,
             )
-        )
+
+            description = (
+                f"Media tag **{name}** is ready (`{ext}`).\n"
+                f"Use it with `{config.COMMAND_PREFIX}{name}`."
+            )
+            if caption:
+                description += f"\nCaption: {caption}"
+
+            await ctx.reply(
+                embed=fluxer.Embed(
+                    title="Media tag created",
+                    description=description,
+                    color=_COLOR,
+                )
+            )
+
+        else:
+            # Plain text tag — original behaviour
+            text = parts[2]
+
+            tags[name] = {
+                "type": "text",
+                "text": text,
+                "author_id": ctx.author.id,
+                "author_name": ctx.author.display_name,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            self.settings.set(ctx.guild_id, "tags", tags)
+            log.info(
+                "Text tag '%s' created in guild %d by %s",
+                name, ctx.guild_id, ctx.author.username,
+            )
+
+            await ctx.reply(
+                embed=fluxer.Embed(
+                    title="Tag created",
+                    description=(
+                        f"Tag **{name}** is ready.\n"
+                        f"Use it with `{config.COMMAND_PREFIX}{name}`."
+                    ),
+                    color=_COLOR,
+                )
+            )
 
     async def _tag_remove(self, ctx: fluxer.Message, parts: list[str]) -> None:
         if len(parts) < 2:
-            await ctx.reply(f"Usage: `{config.COMMAND_PREFIX}tag remove <n>`")
+            await ctx.reply(f"Usage: `{config.COMMAND_PREFIX}tag remove <name>`")
             return
 
         name = parts[1].lower()
@@ -149,6 +287,18 @@ class UtilityCog(fluxer.Cog):
         if name not in tags:
             await ctx.reply(f"No tag named **{name}** exists on this server.")
             return
+
+        tag = tags[name]
+
+        # Delete the media file from disk if this is a media tag
+        if tag.get("type") == "media":
+            media_path: str = tag.get("media_path", "")
+            if media_path and os.path.isfile(media_path):
+                try:
+                    os.remove(media_path)
+                    log.info("Deleted media file: %s", media_path)
+                except OSError as exc:
+                    log.warning("Could not delete media file %s: %s", media_path, exc)
 
         del tags[name]
         self.settings.set(ctx.guild_id, "tags", tags)
@@ -161,25 +311,28 @@ class UtilityCog(fluxer.Cog):
 
         if not tags:
             await ctx.reply(
-                f"No tags yet. Create one with `{config.COMMAND_PREFIX}tag add <n> <text>`."
+                f"No tags yet. Create one with `{config.COMMAND_PREFIX}tag add <name> <text>`."
             )
             return
 
-        # List tag names in alphabetical order, formatted in a code block
+        # Annotate media tags with a 🖼 indicator
         names = sorted(tags.keys())
-        tag_list = "  ".join(f"`{n}`" for n in names)
+        tag_list = "  ".join(
+            f"`{n}` 🖼" if tags[n].get("type") == "media" else f"`{n}`"
+            for n in names
+        )
 
         embed = fluxer.Embed(
             title=f"Tags — {len(tags)} total",
             description=tag_list,
             color=_COLOR,
-        ).set_footer(text=f"Use {config.COMMAND_PREFIX}<n> to trigger a tag.")
+        ).set_footer(text=f"🖼 = media tag  •  Use {config.COMMAND_PREFIX}<name> to trigger a tag.")
 
         await ctx.reply(embed=embed)
 
     async def _tag_info(self, ctx: fluxer.Message, parts: list[str]) -> None:
         if len(parts) < 2:
-            await ctx.reply(f"Usage: `{config.COMMAND_PREFIX}tag info <n>`")
+            await ctx.reply(f"Usage: `{config.COMMAND_PREFIX}tag info <name>`")
             return
 
         name = parts[1].lower()
@@ -197,12 +350,32 @@ class UtilityCog(fluxer.Cog):
         except (ValueError, TypeError):
             created_str = "Unknown"
 
-        embed = (
-            fluxer.Embed(title=f"Tag: {name}", color=_COLOR)
-            .add_field(name="Content", value=tag["text"], inline=False)
-            .add_field(name="Created by", value=tag.get("author_name", "Unknown"), inline=True)
-            .add_field(name="Created at", value=created_str, inline=True)
-        )
+        tag_type = tag.get("type", "text")
+
+        if tag_type == "media":
+            filename   = tag.get("filename", "unknown")
+            _, ext     = os.path.splitext(filename)
+            media_path = tag.get("media_path", "")
+            on_disk    = "✅ on disk" if os.path.isfile(media_path) else "❌ file missing"
+            caption    = tag.get("caption") or "*(none)*"
+
+            embed = (
+                fluxer.Embed(title=f"Tag: {name}", color=_COLOR)
+                .add_field(name="Type",       value=f"Media (`{ext}`)",      inline=True)
+                .add_field(name="File",        value=f"`{filename}` {on_disk}", inline=True)
+                .add_field(name="Caption",     value=caption,                inline=False)
+                .add_field(name="Created by",  value=tag.get("author_name", "Unknown"), inline=True)
+                .add_field(name="Created at",  value=created_str,            inline=True)
+            )
+        else:
+            embed = (
+                fluxer.Embed(title=f"Tag: {name}", color=_COLOR)
+                .add_field(name="Type",        value="Text",                 inline=True)
+                .add_field(name="Content",     value=tag.get("text", ""),    inline=False)
+                .add_field(name="Created by",  value=tag.get("author_name", "Unknown"), inline=True)
+                .add_field(name="Created at",  value=created_str,            inline=True)
+            )
+
         await ctx.reply(embed=embed)
 
     # =========================================================================
@@ -232,7 +405,7 @@ class UtilityCog(fluxer.Cog):
         if not name:
             return
 
-        # If it's a real command, do nothing — discord.py dispatches it automatically
+        # If it's a real command, do nothing — the framework dispatches it
         if name in self.bot._commands:
             log.debug("on_message: '%s' is a real command, skipping", name)
             return
@@ -243,8 +416,42 @@ class UtilityCog(fluxer.Cog):
             log.debug("on_message: '%s' not a tag, skipping", name)
             return
 
-        await message.reply(tags[name]["text"])
-        log.info("Tag '%s' triggered in guild %d", name, message.guild_id)
+        tag = tags[name]
+        tag_type = tag.get("type", "text")
+
+        if tag_type == "media":
+            media_path: str = tag.get("media_path", "")
+            filename: str   = tag.get("filename", "media")
+            caption: str    = tag.get("caption", "")
+
+            if not media_path or not os.path.isfile(media_path):
+                log.warning("Tag '%s' media file missing at %s", name, media_path)
+                await message.reply(
+                    f"⚠️ The media file for tag **{name}** is missing. "
+                    f"An admin may need to recreate it."
+                )
+                return
+
+            try:
+                # fluxer.File and discord.File share the same constructor:
+                # File(fp, filename=...) where fp is a binary file-like object.
+                with open(media_path, "rb") as fp:
+                    media_file = fluxer.File(fp, filename=filename)
+                    await message.reply(
+                        content=caption if caption else None,
+                        file=media_file,
+                    )
+            except Exception as exc:
+                log.exception("Failed to send media for tag '%s': %s", name, exc)
+                await message.reply(f"⚠️ Could not send the media for tag **{name}**: `{exc}`")
+
+        else:
+            await message.reply(tag.get("text", ""))
+
+        log.info(
+            "Tag '%s' triggered in guild %d (type=%s)",
+            name, message.guild_id, tag_type,
+        )
 
     # =========================================================================
     # General commands
@@ -305,7 +512,6 @@ class UtilityCog(fluxer.Cog):
         if guild.icon_url:
             embed.set_thumbnail(url=guild.icon_url)
 
-        # FIX: send as a fresh message so the command text isn't quoted in the reply
         channel = self.bot._channels.get(ctx.channel_id)
         if channel:
             await channel.send(embed=embed)
@@ -363,7 +569,6 @@ class UtilityCog(fluxer.Cog):
         if target_user.avatar_url:
             embed.set_thumbnail(url=target_user.avatar_url)
 
-        # FIX: same as serverinfo — send fresh to avoid reply quoting the command
         channel = self.bot._channels.get(ctx.channel_id)
         if channel:
             await channel.send(embed=embed)
