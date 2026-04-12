@@ -228,10 +228,14 @@ class UtilityCog(fluxer.Cog):
 
         # Only fire if it's NOT already a registered bot command
         if name in self.bot._commands:
+            if hasattr(self.bot, "process_commands"):
+                await self.bot.process_commands(message._msg)
             return
 
         tags: dict = self.settings.get(message.guild_id, "tags") or {}
         if name not in tags:
+            if hasattr(self.bot, "process_commands"):
+                await self.bot.process_commands(message._msg)
             return
 
         await message.reply(tags[name]["text"])
