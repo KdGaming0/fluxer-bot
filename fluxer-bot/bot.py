@@ -33,6 +33,10 @@ import logging
 import sys
 import os
 
+# Force line-buffered stdout so child output isn't swallowed when running
+# under systemd (which uses a pipe, not a TTY, causing Python to block-buffer).
+sys.stdout.reconfigure(line_buffering=True)
+
 import config
 
 logging.basicConfig(
@@ -96,7 +100,7 @@ async def _stream_process(proc: asyncio.subprocess.Process, prefix: str) -> None
         line = await proc.stdout.readline()
         if not line:
             break
-        print(f"{prefix} {line.decode(errors='replace')}", end="")
+        print(f"{prefix} {line.decode(errors='replace')}", end="", flush=True)
     await proc.wait()
 
 
@@ -105,6 +109,7 @@ async def _run_bot(script: str, prefix: str) -> None:
     log.info("Starting %s (script: %s)", prefix.strip("[]"), script)
     proc = await asyncio.create_subprocess_exec(
         sys.executable,
+        "-u",  # force unbuffered stdout/stderr in the child process
         os.path.join(os.path.dirname(__file__), script),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
