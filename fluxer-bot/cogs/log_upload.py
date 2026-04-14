@@ -2,7 +2,7 @@
 cogs/log_upload.py
 ------------------
 Automatically detects Minecraft crash reports and log files posted in chat —
-either as a .txt / .log file attachment or as a long inline paste — uploads
+either as a .txt / .log file attachment or as a long inline paste ��� uploads
 them to mclo.gs, deletes the original message, and posts a clean embed with
 the mclo.gs link, detected software info, and any identified problems.
 
@@ -56,10 +56,10 @@ log = logging.getLogger("cog.log_upload")
 # ── Tunables ──────────────────────────────────────────────────────────────────
 
 # Inline message must have at least this many lines to be considered
-LOG_UPLOAD_MIN_LINES: int = 10
+LOG_UPLOAD_MIN_LINES: int = 15
 
 # … OR at least this many characters
-LOG_UPLOAD_MIN_CHARS: int = 800
+LOG_UPLOAD_MIN_CHARS: int = 1000
 
 # File attachments larger than this (bytes) are truncated before upload.
 # mclo.gs hard limit is 10 MiB; we keep well below that.
@@ -249,6 +249,11 @@ class LogUploadCog(fluxer.Cog):
         if message.author.bot:
             return
         if message.guild_id is None:
+            return
+
+        # ── Ignore commands ───────────────────────────────────────────────────
+        # Prevents false positives when running commands (e.g. !tag add ... Prism Launcher)
+        if message.content and message.content.startswith(config.COMMAND_PREFIX):
             return
 
         # ── Check feature is enabled for this guild ───────────────────────────
@@ -458,8 +463,9 @@ class LogUploadCog(fluxer.Cog):
 
         # ── Description ───────────────────────────────────────────────────────
         description = (
-            f"{author_mention} your log has been uploaded to mclo.gs.\n\n"
-            f"🔗 **[View on mclo.gs]({mclog_url})**"
+            f"{author_mention} your message was detected as a Minecraft crash report or log file. "
+            f"It has been automatically uploaded to mclo.gs to keep the chat clean and readable.\n\n"
+            f"🔗 **[View your log on mclo.gs]({mclog_url})**"
         )
 
         embed = fluxer.Embed(title=title, description=description, color=_COLOR)

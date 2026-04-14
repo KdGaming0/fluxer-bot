@@ -41,6 +41,9 @@ _COLOR = 0x5865F2
 # Maximum number of tags per guild, to prevent abuse
 _MAX_TAGS = 100
 
+# Maximum size for media tags (8 MB)
+MAX_MEDIA_BYTES: int = 8 * 1024 * 1024
+
 # Where media files are stored on disk
 _MEDIA_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "tag_media")
 
@@ -186,6 +189,15 @@ class UtilityCog(fluxer.Cog):
         # ── Branch: media tag vs text tag ────────────────────────────────────
         if has_attachment:
             attachment = attachments[0]
+
+            # Check if file exceeds the 8 MB limit
+            file_size = getattr(attachment, "size", 0) or 0
+            if file_size > MAX_MEDIA_BYTES:
+                await ctx.reply(
+                    f"File is too large (`{file_size / (1024*1024):.2f} MB`). "
+                    "The maximum allowed size for media tags is 8 MB."
+                )
+                return
 
             # attachment.filename exists on both discord.py (Attachment.filename)
             # and Fluxer (mirrors the same attribute name)
