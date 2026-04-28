@@ -32,6 +32,7 @@ Usage:
 import json
 import logging
 import os
+import tempfile
 from typing import Any
 
 log = logging.getLogger("utils.storage")
@@ -76,12 +77,46 @@ class GuildSettings:
             log.error("Failed to load settings file: %s — starting fresh", exc)
 
     def _save(self) -> None:
-        """Write the current state to disk."""
+        """Write the current state to disk using an atomic temp-file + rename.
+
+        ``open("w")`` truncates the file immediately, so a crash or kill signal
+        between the open and the completed write leaves the file empty or
+        partially written.  ``json.load`` then raises ``JSONDecodeError`` on the
+        next startup and the entire settings store is silently reset to empty —
+        causing tracked mod versions to look "new" and triggering duplicate
+        update notifications after every restart.
+
+        The fix: write to a sibling temp file in the same directory, then call
+        ``os.replace()``.  On POSIX this is an atomic rename; the data file is
+        always either the previous complete copy or the new complete copy, never
+        a corrupted intermediate.  On Windows, ``os.replace()`` is not atomic
+        but is still safer than a direct open-for-write.
+        """
+        tmp_path: str | None = None
         try:
-            with open(_DATA_FILE, "w", encoding="utf-8") as f:
-                json.dump(self._data, f, indent=2)
+            fd, tmp_path = tempfile.mkstemp(dir=_DATA_DIR, suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(self._data, f, indent=2)
+            except Exception:
+                # fdopen takes ownership of fd; if it raises before returning
+                # we still need to close the descriptor ourselves.
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                raise
+            os.replace(tmp_path, _DATA_FILE)
+            tmp_path = None  # rename succeeded; nothing to clean up
         except OSError as exc:
             log.error("Failed to save settings file: %s", exc)
+        finally:
+            # Remove the orphaned temp file if anything failed after mkstemp.
+            if tmp_path is not None:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
     def _guild_key(self, guild_id: int) -> str:
         return str(guild_id)

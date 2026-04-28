@@ -33,6 +33,7 @@ Commands (all require the relevant Fluxer permission):
         !honeypot role                   - Clear the ping role
         !honeypot muterole @role         - Set the role applied to honeypot offenders
         !honeypot muterole               - Clear the honeypot mute role
+        !honeypot status                 - Show the current honeypot configuration
 
 Automatic protections (no commands needed):
     - Banned word filter
@@ -657,6 +658,8 @@ class ModerationCog(fluxer.Cog):
             await self._honeypot_muterole(ctx, parts)
         elif sub == "mode":
             await self._honeypot_mode(ctx, parts)
+        elif sub == "status":
+            await self._honeypot_status(ctx)
         else:
             await ctx.reply(
                 embed=fluxer.Embed(
@@ -672,7 +675,8 @@ class ModerationCog(fluxer.Cog):
                         f"`{config.COMMAND_PREFIX}honeypot muterole @role` — Set role to apply on trigger\n"
                         f"`{config.COMMAND_PREFIX}honeypot muterole` — Clear applied role\n"
                         f"`{config.COMMAND_PREFIX}honeypot mode role` — Use role punishment\n"
-                        f"`{config.COMMAND_PREFIX}honeypot mode timeout` — Use Discord timeout"
+                        f"`{config.COMMAND_PREFIX}honeypot mode timeout` — Use Discord timeout\n"
+                        f"`{config.COMMAND_PREFIX}honeypot status` — Show current config"
                     ),
                     color=_COLOR_INFO,
                 )
@@ -893,6 +897,61 @@ class ModerationCog(fluxer.Cog):
                 color=_COLOR_OK,
             )
         )
+
+    async def _honeypot_status(self, ctx: fluxer.Message) -> None:
+        """Show the current honeypot configuration for this guild.
+
+        Usage:  !honeypot status
+        """
+        s = self.settings
+
+        channel_id   = s.get(ctx.guild_id, "honeypot_channel_id")
+        log_ch_id    = s.get(ctx.guild_id, "honeypot_log_channel_id")
+        modlog_ch_id = s.get(ctx.guild_id, "modlog_channel_id")
+        ping_role_id = s.get(ctx.guild_id, "honeypot_ping_role_id")
+        mute_role_id = s.get(ctx.guild_id, "honeypot_mute_role_id")
+        mode         = s.get(ctx.guild_id, "honeypot_action_mode") or "role"
+
+        # ── channel ───────────────────────────────────────────────────────────
+        if channel_id:
+            ch = self.bot._channels.get(channel_id)
+            channel_val = f"<#{channel_id}>" + ("" if ch else f" *(ID `{channel_id}` — not cached)*")
+        else:
+            channel_val = "❌ Not set"
+
+        # ── log channel ───────────────────────────────────────────────────────
+        if log_ch_id:
+            log_ch = self.bot._channels.get(log_ch_id)
+            log_val = f"<#{log_ch_id}>" + ("" if log_ch else f" *(ID `{log_ch_id}` — not cached)*")
+        elif modlog_ch_id:
+            log_val = f"<#{modlog_ch_id}> *(fallback — general mod log)*"
+        else:
+            log_val = "❌ Not set — alerts will be silently dropped"
+
+        # ── roles ─────────────────────────────────────────────────────────────
+        ping_val = f"<@&{ping_role_id}>" if ping_role_id else "❌ Not set"
+        mute_val = f"<@&{mute_role_id}>" if mute_role_id else "❌ Not set"
+
+        # ── mode ──────────────────────────────────────────────────────────────
+        if mode == "role":
+            mode_val = (
+                f"**role** — applies the mute role on trigger"
+                + (f" (<@&{mute_role_id}>)" if mute_role_id else " *(no mute role configured)*")
+            )
+        else:
+            mode_val = "**timeout** — applies a Discord timeout on trigger"
+
+        embed = fluxer.Embed(
+            title="🍯 Honeypot Configuration",
+            color=_COLOR_INFO,
+        )
+        embed.add_field(name="Honeypot Channel", value=channel_val, inline=False)
+        embed.add_field(name="Alert Log Channel", value=log_val,    inline=False)
+        embed.add_field(name="Ping Role",         value=ping_val,   inline=True)
+        embed.add_field(name="Mute Role",         value=mute_val,   inline=True)
+        embed.add_field(name="Action Mode",       value=mode_val,   inline=False)
+
+        await ctx.reply(embed=embed)
 
     async def _honeypot_mode(self, ctx: fluxer.Message, parts: list[str]) -> None:
         """Set whether the honeypot applies a role or uses Discord timeout.
