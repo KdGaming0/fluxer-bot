@@ -1059,6 +1059,7 @@ class ModerationCog(fluxer.Cog):
                         timeout_until,
                         reason="Honeypot channel triggered",
                     )
+                    timeout_applied = True
                 except Exception as exc:
                     log.error("Could not timeout honeypot offender: %s", exc)
             else:
