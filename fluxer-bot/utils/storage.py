@@ -43,7 +43,7 @@ _log = logging.getLogger("utils.storage")
 # ============================================================================
 # Paths
 # ============================================================================
-_DATA_DIR = os.path.join(os.path.dirname(__file__), "../..", "data")
+_DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 
 # Discord and Fluxer run in separate processes but load the same cogs.
 # Use platform-specific filenames to prevent cross-process races.

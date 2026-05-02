@@ -13,7 +13,7 @@ os.environ["BOT_PLATFORM"] = "fluxer"
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import fluxer
-import utils.config as config
+import config
 
 logging.basicConfig(
     level=logging.INFO,

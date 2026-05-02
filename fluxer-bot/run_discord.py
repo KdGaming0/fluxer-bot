@@ -11,7 +11,7 @@ os.environ["BOT_PLATFORM"] = "discord"
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import utils.discord_shim
-import utils.config as config
+import config
 
 logging.basicConfig(
     level=logging.INFO,
