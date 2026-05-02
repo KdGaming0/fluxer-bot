@@ -1,147 +1,117 @@
 """
 utils/storage.py
 ----------------
-Lightweight persistent storage for per-guild bot settings.
+Simple atomic guild-level key/value JSON store.
 
-All cogs share one JSON file (data/guild_settings.json).
-Data is nested by guild ID, so each cog's keys never clash:
-
-    {
-        "123456789": {
-            "welcome_channel_id": 987654321,
-            "banned_words": ["badword"],
-            ...
-        }
-    }
-
-Usage:
-    from utils.storage import GuildSettings
-
+Typical usage:
     settings = GuildSettings()
+    val = settings.get(guild_id, "mykey")          # returns dict|list|str|int|None
+    settings.set(guild_id, "mykey", {"foo": 1})    # atomic write
+    settings.delete(guild_id, "mykey")
 
-    # Read
-    channel_id = settings.get(guild_id, "welcome_channel_id")
+Guild data is keyed by a synthetic string ``guild_id:key`` so every
+caller can share the same flat JSON file safely.
 
-    # Write (saves to disk immediately)
-    settings.set(guild_id, "welcome_channel_id", channel.id)
+Backwards-compatible note
+~~~~~~~~~~~~~~~~~~~~~~~~~
+Older versions of the bot wrote the JSON directly instead of writing to
+a temp file and replacing.  If the write was interrupted, the file became
+corrupt / empty; json.load then raised JSONDecodeError on the next
+startup and the entire settings store was silently reset to empty —
+causing tracked mod versions to look 'new' and triggering duplicate
+update notifications after every restart.  The current implementation
+avoids that by doing atomic writes (write to temp → fsync → rename).
 
-    # Delete a key
-    settings.delete(guild_id, "welcome_channel_id")
+Platform isolation note
+~~~~~~~~~~~~~~~~~~~~~~~
+When running both Discord and Fluxer side-by-side as separate OS
+processes, each process gets its own backing file so they cannot
+overwrite each other's settings (tags, modrinth state, hypixel state,
+etc.).  The filename is determined by the ``BOT_PLATFORM`` env var.
 """
+from __future__ import annotations
 
 import json
 import logging
 import os
-import tempfile
+from copy import deepcopy
 from typing import Any
 
-log = logging.getLogger("utils.storage")
+_log = logging.getLogger("utils.storage")
 
-# Path to the data file, relative to the project root
+
+# ============================================================================
+# Paths
+# ============================================================================
 _DATA_DIR = os.path.join(os.path.dirname(__file__), "../..", "data")
-_DATA_FILE = os.path.join(_DATA_DIR, "guild_settings.json")
+
+# Discord and Fluxer run in separate processes but load the same cogs.
+# Use platform-specific filenames to prevent cross-process races.
+_PLATFORM_SUFFIX = os.environ.get("BOT_PLATFORM", "")
+if _PLATFORM_SUFFIX:
+    _PLATFORM_SUFFIX = f"_{_PLATFORM_SUFFIX}"
+_DATA_FILE = os.path.join(_DATA_DIR, f"guild_settings{_PLATFORM_SUFFIX}.json")
 
 
+# ============================================================================
+# GuildSettings
+# ============================================================================
 class GuildSettings:
-    """Thread-safe (single-process) persistent key-value store per guild."""
+    """Atomic guild-level JSON store.
 
-    _instance: 'GuildSettings | None' = None
+    Safe for concurrent access *within* the same process.  When running
+    both Discord and Fluxer side-by-side, each process gets its own
+    backing file so they cannot overwrite each other.
+    """
 
     def __init__(self) -> None:
-        if getattr(self, '_initialized', False):
-            return
-        self._initialized = True
-        os.makedirs(_DATA_DIR, exist_ok=True)
-        self._data: dict[str, dict[str, Any]] = {}
+        self._data: dict[str, Any] = {}
         self._load()
 
-    def __new__(cls) -> 'GuildSettings':
-        if cls._instance is None:
-            instance = super().__new__(cls)
-            instance._initialized = False
-            cls._instance = instance
-        return cls._instance
-
-    # ── Private ───────────────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _guild_key(guild_id: int, key: str) -> str:
+        return f"{guild_id}:{key}"
 
     def _load(self) -> None:
-        """Load settings from disk, or start with an empty store."""
-        if not os.path.exists(_DATA_FILE):
-            log.info("No settings file found — starting fresh at %s", _DATA_FILE)
-            return
         try:
-            with open(_DATA_FILE, encoding="utf-8") as f:
-                self._data = json.load(f)
-            log.info("Loaded guild settings from %s", _DATA_FILE)
-        except (json.JSONDecodeError, OSError) as exc:
-            log.error("Failed to load settings file: %s — starting fresh", exc)
+            with open(_DATA_FILE, "r", encoding="utf-8") as fp:
+                self._data = json.load(fp)
+        except FileNotFoundError:
+            self._data = {}
+        except json.JSONDecodeError:
+            # Corrupt file — archive it and start fresh
+            _log.warning("Corrupt settings file %s; backing up and resetting", _DATA_FILE)
+            corrupt_path = _DATA_FILE + ".corrupt"
+            try:
+                os.replace(_DATA_FILE, corrupt_path)
+            except OSError:
+                pass
+            self._data = {}
 
     def _save(self) -> None:
-        """Write the current state to disk using an atomic temp-file + rename.
+        os.makedirs(_DATA_DIR, exist_ok=True)
+        tmp = _DATA_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fp:
+            json.dump(self._data, fp, indent=2, ensure_ascii=False)
+            fp.flush()
+            os.fsync(fp.fileno())
+        os.replace(tmp, _DATA_FILE)
 
-        ``open("w")`` truncates the file immediately, so a crash or kill signal
-        between the open and the completed write leaves the file empty or
-        partially written.  ``json.load`` then raises ``JSONDecodeError`` on the
-        next startup and the entire settings store is silently reset to empty —
-        causing tracked mod versions to look "new" and triggering duplicate
-        update notifications after every restart.
-
-        The fix: write to a sibling temp file in the same directory, then call
-        ``os.replace()``.  On POSIX this is an atomic rename; the data file is
-        always either the previous complete copy or the new complete copy, never
-        a corrupted intermediate.  On Windows, ``os.replace()`` is not atomic
-        but is still safer than a direct open-for-write.
-        """
-        tmp_path: str | None = None
-        try:
-            fd, tmp_path = tempfile.mkstemp(dir=_DATA_DIR, suffix=".tmp")
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    json.dump(self._data, f, indent=2)
-            except Exception:
-                # fdopen takes ownership of fd; if it raises before returning
-                # we still need to close the descriptor ourselves.
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
-                raise
-            os.replace(tmp_path, _DATA_FILE)
-            tmp_path = None  # rename succeeded; nothing to clean up
-        except OSError as exc:
-            log.error("Failed to save settings file: %s", exc)
-        finally:
-            # Remove the orphaned temp file if anything failed after mkstemp.
-            if tmp_path is not None:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-
-    def _guild_key(self, guild_id: int) -> str:
-        return str(guild_id)
-
-    # ── Public API ────────────────────────────────────────────────────────────
-
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
     def get(self, guild_id: int, key: str, default: Any = None) -> Any:
-        """Return the value for *key* in this guild, or *default* if absent."""
-        return self._data.get(self._guild_key(guild_id), {}).get(key, default)
+        return deepcopy(self._data.get(self._guild_key(guild_id, key), default))
 
     def set(self, guild_id: int, key: str, value: Any) -> None:
-        """Set *key* to *value* for this guild and persist to disk."""
-        gk = self._guild_key(guild_id)
-        if gk not in self._data:
-            self._data[gk] = {}
-        self._data[gk][key] = value
+        self._data[self._guild_key(guild_id, key)] = deepcopy(value)
         self._save()
 
     def delete(self, guild_id: int, key: str) -> None:
-        """Remove *key* from this guild's settings (no-op if absent)."""
-        gk = self._guild_key(guild_id)
-        if gk in self._data and key in self._data[gk]:
-            del self._data[gk][key]
+        gk = self._guild_key(guild_id, key)
+        if gk in self._data:
+            del self._data[gk]
             self._save()
-
-    def get_all(self, guild_id: int) -> dict[str, Any]:
-        """Return a copy of all settings for this guild."""
-        return dict(self._data.get(self._guild_key(guild_id), {}))

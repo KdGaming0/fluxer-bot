@@ -420,7 +420,11 @@ class ModrinthCog(fluxer.Cog):
 
             latest = next((v for v in versions if v.get("status") == "listed"), versions[0])
 
-            if latest["id"] == entry.get("last_version_id"):
+            seen_ids = set(entry.get("known_version_ids") or [])
+            # Backwards-compat: if no known_version_ids, fall back to last_version_id
+            if not seen_ids:
+                seen_ids = {entry.get("last_version_id")}
+            if latest["id"] in seen_ids:
                 continue  # already up to date
 
             pending.append((project_id, entry, latest))
@@ -437,6 +441,12 @@ class ModrinthCog(fluxer.Cog):
         # mid-loop, the IDs are already on disk so we won't re-notify.
         for project_id, entry, latest in pending:
             entry["last_version_id"] = latest["id"]
+            known_ids = list(entry.get("known_version_ids", []))
+            if latest["id"] not in known_ids:
+                known_ids.insert(0, latest["id"])
+            if len(known_ids) > 20:
+                known_ids = known_ids[:20]
+            entry["known_version_ids"] = known_ids
             # Update cached project name if we got fresh metadata
             meta = projects_meta.get(project_id)
             if meta:
@@ -582,12 +592,20 @@ class ModrinthCog(fluxer.Cog):
             (versions or [None])[0],
         )
 
+        latest_id = latest["id"] if latest else None
+        # Seed known_version_ids with all current versions so a later status
+        # change (e.g. listed→archived) does not trigger a false "new" alert.
+        known_ids = [v["id"] for v in (versions or []) if v.get("id")]
+        if latest_id and latest_id not in known_ids:
+            known_ids.insert(0, latest_id)
+
         entry = {
             "channel_id":      channel_id,
             "roles":           roles,
             "mc_versions":     mc_versions,
             "loader":          loader,
-            "last_version_id": latest["id"] if latest else None,
+            "last_version_id": latest_id,
+            "known_version_ids": known_ids[:20],
             "project_name":    project.get("title", project_id),
         }
 
@@ -682,12 +700,18 @@ class ModrinthCog(fluxer.Cog):
                     (versions or [None])[0],
                 )
 
+                latest_id = latest["id"] if latest else None
+                known_ids = [v["id"] for v in (versions or []) if v.get("id")]
+                if latest_id and latest_id not in known_ids:
+                    known_ids.insert(0, latest_id)
+
                 data["tracked"][project["id"]] = {
                     "channel_id":      channel_id,
                     "roles":           roles,
                     "mc_versions":     mc_versions,
                     "loader":          loader,
-                    "last_version_id": latest["id"] if latest else None,
+                    "last_version_id": latest_id,
+                    "known_version_ids": known_ids[:20],
                     "project_name":    project.get("title", pid),
                 }
                 added.append(project.get("title", pid))

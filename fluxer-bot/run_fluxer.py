@@ -1,89 +1,79 @@
-"""
-run_fluxer.py
--------------
-Fluxer bot entry point.
-
-Launched automatically by bot.py (master launcher), or directly:
-    python run_fluxer.py
-
-This is essentially the original bot.py, renamed so that bot.py can be
-repurposed as the master launcher for both platforms.
-"""
-
 import asyncio
 import logging
 import os
 import sys
+import importlib
+import json
+
+# ── Platform isolation ──────────────────────────────────────────────────────
+# Set this before any import that may transitively import utils.storage,
+# so Discord and Fluxer get their own guild_settings JSON files.
+os.environ["BOT_PLATFORM"] = "fluxer"
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import fluxer
-import config
+import utils.config as config
 
-# ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-log = logging.getLogger("fluxer_bot")
-
-# ── Bot instance ──────────────────────────────────────────────────────────────
-intents = fluxer.Intents.all()
-
-bot = fluxer.Bot(
-    command_prefix=config.COMMAND_PREFIX,
-    intents=intents,
+    format="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
 )
 
-
-# ── Events ────────────────────────────────────────────────────────────────────
-@bot.event
-async def on_ready() -> None:
-    log.info("Logged in as %s", bot.user)
-    log.info("Command prefix : %s", config.COMMAND_PREFIX)
-    if config.FLUXER_CLIENT_ID:
-        log.info(
-            "Invite : https://fluxer.gg/oauth2/authorize"
-            "?client_id=%s&permissions=8&scope=bot",
-            config.FLUXER_CLIENT_ID,
-        )
-
-
-@bot.event
-async def on_guild_join(guild: fluxer.Guild) -> None:
-    log.info(
-        "Guild available: %s (%d) — total: %d", guild, guild.id, len(bot.guilds)
-    )
+# Map IDs → name for logs; pass name into add_cog so it uses the right key
+COG_ID_TO_NAME = {
+    "welcome":      "WelcomeCog",
+    "modrinth":     "ModrinthCog",
+    "hypixel_updates": "HypixelUpdatesCog",
+    "reddit_monitor":  "RedditMonitorCog",
+    "utility":      "UtilityCog",
+    "log_upload":   "LogUploadCog",
+    "hypixel_monitor": "HypixelMonitorCog",
+    "moderation":   "ModerationCog",
+    "roles":        "RolesCog",
+    "detection":    "DetectionCog",
+}
 
 
-# ── Cog auto-loader ───────────────────────────────────────────────────────────
-async def load_cogs() -> None:
-    """Discover and load every module inside the cogs/ directory."""
-    cogs_dir = os.path.join(os.path.dirname(__file__), "cogs")
+def _get_cog_classes(module):
+    classes = []
+    for _, obj in inspect.getmembers(module, inspect.isclass):
+        if issubclass(obj, fluxer.Cog) and obj is not fluxer.Cog:
+            classes.append(obj)
+    return classes
 
-    for filename in sorted(os.listdir(cogs_dir)):
+
+async def load_cogs():
+    import inspect
+    cog_dir = os.path.join(os.path.dirname(__file__), "cogs")
+    if not os.path.isdir(cog_dir):
+        print("Cog directory not found.")
+        return
+    for filename in os.listdir(cog_dir):
         if not filename.endswith(".py") or filename.startswith("_"):
             continue
-
-        module_name = f"cogs.{filename[:-3]}"
+        cog_id = filename[:-3]
+        module_name = f"cogs.{cog_id}"
         try:
-            await bot.load_extension(module_name)
-            log.info("Loaded cog: %s", module_name)
-        except Exception:
-            log.exception("Failed to load cog: %s", module_name)
+            module = importlib.import_module(module_name)
+            for cls in _get_cog_classes(module):
+                instance = cls(bot)
+                name = COG_ID_TO_NAME.get(cog_id, cls.__name__)
+                await bot.add_cog(instance, name=name)
+                print(f"Loaded cog: {name}")
+        except Exception as exc:
+            print(f"Failed to load cog {cog_id}: {exc}")
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
-async def main() -> None:
-    if not config.FLUXER_TOKEN:
-        log.error(
-            "FLUXER_TOKEN environment variable is not set. "
-            "Export it before running the bot."
-        )
-        sys.exit(1)
-
+async def main():
+    global bot
+    bot = fluxer.Bot(command_prefix=config.COMMAND_PREFIX, intents=fluxer.Intents.default())
     await load_cogs()
     await bot.start(config.FLUXER_TOKEN)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
