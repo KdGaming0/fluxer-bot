@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from copy import deepcopy
 from typing import Any
 
@@ -59,14 +60,25 @@ _DATA_FILE = os.path.join(_DATA_DIR, f"guild_settings{_PLATFORM_SUFFIX}.json")
 class GuildSettings:
     """Atomic guild-level JSON store.
 
+    *Singleton* — every cog in the same process shares one instance so
+    in-memory state is always consistent.  Before each write we re-read
+    the file so we do not clobber changes made by the other platform
+    process.
+
     Safe for concurrent access *within* the same process.  When running
     both Discord and Fluxer side-by-side, each process gets its own
     backing file so they cannot overwrite each other.
     """
 
-    def __init__(self) -> None:
-        self._data: dict[str, Any] = {}
-        self._load()
+    _instance: "GuildSettings | None" = None
+    _lock = threading.Lock()
+
+    def __new__(cls) -> "GuildSettings":
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._data: dict[str, Any] = {}
+            cls._instance._load()
+        return cls._instance
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -92,10 +104,22 @@ class GuildSettings:
             self._data = {}
 
     def _save(self) -> None:
+        """Atomic write — re-read first so we do not overwrite other writers."""
+        # Merge our in-memory changes on top of whatever is currently on disk
+        try:
+            with open(_DATA_FILE, "r", encoding="utf-8") as fp:
+                on_disk: dict[str, Any] = json.load(fp)
+        except (FileNotFoundError, json.JSONDecodeError):
+            on_disk = {}
+
+        # Our _data is the most recent truth for this process
+        merged = on_disk.copy()
+        merged.update(self._data)
+
         os.makedirs(_DATA_DIR, exist_ok=True)
         tmp = _DATA_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fp:
-            json.dump(self._data, fp, indent=2, ensure_ascii=False)
+            json.dump(merged, fp, indent=2, ensure_ascii=False)
             fp.flush()
             os.fsync(fp.fileno())
         os.replace(tmp, _DATA_FILE)
