@@ -783,7 +783,7 @@ class ModrinthCog(fluxer.Cog):
         ))
 
     async def _cmd_list(self, ctx: fluxer.Message, args: list[str] = None) -> None:
-        data    = self.settings.get(ctx.guild_id, "modrinth") or {}
+        data = self.settings.get(ctx.guild_id, "modrinth") or {}
         tracked: dict = data.get("tracked", {})
 
         if not tracked:
@@ -804,7 +804,7 @@ class ModrinthCog(fluxer.Cog):
             lines.append(f"<#{channel_id}> — {len(entries)} mod{'s' if len(entries) != 1 else ''}")
             for pid, entry in sorted(entries, key=lambda x: x[1].get("project_name", "").lower()):
                 loader = entry.get("loader") or "any"
-                mc     = ", ".join(entry.get("mc_versions") or []) or "any"
+                mc = ", ".join(entry.get("mc_versions") or []) or "any"
                 lines.append(
                     f"  • **{entry.get('project_name', pid)}** `{pid}`"
                     f" · loader: `{loader}` · mc: `{mc}`"
@@ -816,8 +816,6 @@ class ModrinthCog(fluxer.Cog):
             lines.append(f"_Server default loader: {default_loader}_")
 
         # ── Bulk-add helper block ──────────────────────────────────────────────
-        # One code block per channel so you can paste the IDs straight into
-        # `!track bulk #channel ... -- <ids>` on another server.
         lines.append("\n**Project IDs by channel** _(for `!track bulk`)_")
         for channel_id, entries in sorted(by_channel.items(), key=lambda x: x[0]):
             ids_line = " ".join(pid for pid, _ in sorted(entries, key=lambda x: x[1].get("project_name", "").lower()))
@@ -836,9 +834,17 @@ class ModrinthCog(fluxer.Cog):
         if current:
             messages.append(current)
 
+        # Send first chunk as reply, rest as plain channel messages
         await ctx.reply(content=messages[0])
-        for chunk in messages[1:]:
-            await ctx.send_to_channel(ctx.channel_id, content=chunk)
+
+        channel = self.bot._channels.get(ctx.channel_id)
+        if channel:
+            for chunk in messages[1:]:
+                await channel.send(content=chunk)
+        else:
+            # Fallback: send remaining chunks as replies if channel lookup fails
+            for chunk in messages[1:]:
+                await ctx.reply(content=chunk)
 
     async def _cmd_check(self, ctx: fluxer.Message, args: list[str] = None) -> None:
         await ctx.reply(content="🔍 Running manual update check…")
