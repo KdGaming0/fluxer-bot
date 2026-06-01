@@ -329,7 +329,7 @@ class UtilityCog(fluxer.Cog):
 
         # Annotate media tags with a 🖼 indicator
         names = sorted(tags.keys())
-        tag_list = "  ".join(
+        tag_list = "\n".join(
             f"`{n}` 🖼" if tags[n].get("type") == "media" else f"`{n}`"
             for n in names
         )

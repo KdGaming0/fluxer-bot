@@ -191,6 +191,27 @@ class ModerationCog(fluxer.Cog):
         text = re.sub(r"\s+", " ", text).strip()
         return text
 
+    @staticmethod
+    async def _delete_after(msg, delay: float) -> None:
+        """Delete *msg* after *delay* seconds, silently ignoring any error."""
+        await asyncio.sleep(delay)
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+
+    async def _reply_autodelete(
+        self,
+        ctx: fluxer.Message,
+        *args,
+        delay: float = 300,
+        **kwargs,
+    ):
+        """Send a reply and schedule it for deletion after *delay* seconds (default 5 min)."""
+        msg = await ctx.reply(*args, **kwargs)
+        asyncio.create_task(self._delete_after(msg, delay))
+        return msg
+
     # =========================================================================
     # Commands — mod log setup
     # =========================================================================
@@ -621,6 +642,168 @@ class ModerationCog(fluxer.Cog):
                 description=f"Auto-mod word filter **{state}**.",
                 color=_COLOR_OK if enable else _COLOR_WARN,
             )
+        )
+
+    # =========================================================================
+    # Commands — anti-spam (cross-channel duplicate detection)
+    # =========================================================================
+
+    @fluxer.Cog.command(name="antispam")
+    @fluxer.has_permission(fluxer.Permissions.MANAGE_GUILD)
+    async def antispam(self, ctx: fluxer.Message) -> None:
+        """Manage the cross-channel duplicate-spam filter.
+
+        Usage:
+            !antispam bypass add @user    - Exempt a user from duplicate detection
+            !antispam bypass remove @user - Remove a user's exemption
+            !antispam bypass list         - Show all bypassed users
+            !antispam status              - Show current filter settings
+        """
+        args = ctx.content.removeprefix(f"{config.COMMAND_PREFIX}antispam").strip()
+        parts = args.split(None, 2)
+        sub = parts[0].lower() if parts else ""
+
+        if sub == "bypass":
+            await self._antispam_bypass(ctx, parts)
+        elif sub == "status":
+            await self._antispam_status(ctx)
+        else:
+            await self._reply_autodelete(
+                ctx,
+                embed=fluxer.Embed(
+                    description=(
+                        f"`{config.COMMAND_PREFIX}antispam bypass add @user` — Exempt a user\n"
+                        f"`{config.COMMAND_PREFIX}antispam bypass remove @user` — Remove exemption\n"
+                        f"`{config.COMMAND_PREFIX}antispam bypass list` — Show bypassed users\n"
+                        f"`{config.COMMAND_PREFIX}antispam status` — Show filter settings"
+                    ),
+                    color=_COLOR_INFO,
+                )
+            )
+
+    async def _antispam_bypass(self, ctx: fluxer.Message, parts: list[str]) -> None:
+        """Handle !antispam bypass <add|remove|list> [@user]."""
+        action = parts[1].lower() if len(parts) > 1 else ""
+
+        if action == "list":
+            bypass_ids: list = self.settings.get(ctx.guild_id, "antispam_bypass") or []
+            if not bypass_ids:
+                await self._reply_autodelete(
+                    ctx,
+                    embed=fluxer.Embed(
+                        description="No users are currently bypassing the anti-spam filter.",
+                        color=_COLOR_INFO,
+                    ),
+                )
+                return
+
+            lines = "\n".join(f"<@{uid}> (`{uid}`)" for uid in bypass_ids)
+            await self._reply_autodelete(
+                ctx,
+                embed=fluxer.Embed(
+                    title=f"Anti-spam bypass list — {len(bypass_ids)} user(s)",
+                    description=lines,
+                    color=_COLOR_INFO,
+                ),
+            )
+            return
+
+        if action not in ("add", "remove"):
+            await self._reply_autodelete(
+                ctx,
+                f"Usage: `{config.COMMAND_PREFIX}antispam bypass add/remove @user` "
+                f"or `{config.COMMAND_PREFIX}antispam bypass list`",
+            )
+            return
+
+        if not ctx.mentions:
+            await self._reply_autodelete(
+                ctx,
+                f"Please mention a user — e.g. "
+                f"`{config.COMMAND_PREFIX}antispam bypass {action} @user`",
+            )
+            return
+
+        target = ctx.mentions[0]
+        bypass_ids = self.settings.get(ctx.guild_id, "antispam_bypass") or []
+
+        if action == "add":
+            if target.id in bypass_ids:
+                await self._reply_autodelete(
+                    ctx,
+                    embed=fluxer.Embed(
+                        description=f"{target.mention} is already on the bypass list.",
+                        color=_COLOR_WARN,
+                    ),
+                )
+                return
+
+            bypass_ids.append(target.id)
+            self.settings.set(ctx.guild_id, "antispam_bypass", bypass_ids)
+            log.info(
+                "Added user %d to antispam bypass in guild %d", target.id, ctx.guild_id
+            )
+
+            await self._reply_autodelete(
+                ctx,
+                embed=fluxer.Embed(
+                    description=(
+                        f"✅ {target.mention} has been added to the anti-spam bypass list.\n"
+                        f"They will no longer be flagged for cross-channel duplicate messages."
+                    ),
+                    color=_COLOR_OK,
+                ),
+            )
+
+        else:  # remove
+            if target.id not in bypass_ids:
+                await self._reply_autodelete(
+                    ctx,
+                    embed=fluxer.Embed(
+                        description=f"{target.mention} is not on the bypass list.",
+                        color=_COLOR_WARN,
+                    ),
+                )
+                return
+
+            bypass_ids.remove(target.id)
+            self.settings.set(ctx.guild_id, "antispam_bypass", bypass_ids)
+            log.info(
+                "Removed user %d from antispam bypass in guild %d", target.id, ctx.guild_id
+            )
+
+            await self._reply_autodelete(
+                ctx,
+                embed=fluxer.Embed(
+                    description=(
+                        f"✅ {target.mention} has been removed from the anti-spam bypass list.\n"
+                        f"They are now subject to cross-channel duplicate detection again."
+                    ),
+                    color=_COLOR_OK,
+                ),
+            )
+
+    async def _antispam_status(self, ctx: fluxer.Message) -> None:
+        """Show the current duplicate-detection settings."""
+        bypass_ids: list = self.settings.get(ctx.guild_id, "antispam_bypass") or []
+        bypass_str = (
+            ", ".join(f"<@{uid}>" for uid in bypass_ids) if bypass_ids else "None"
+        )
+
+        await self._reply_autodelete(
+            ctx,
+            embed=fluxer.Embed(
+                title="Anti-spam status",
+                description=(
+                    f"**Detection window:** {_DUPE_WINDOW}s\n"
+                    f"**Warning at:** 2 channels\n"
+                    f"**Timeout at:** {_DUPE_TIMEOUT_THRESHOLD}+ channels "
+                    f"({_DUPE_TIMEOUT_SECONDS // 60} min)\n"
+                    f"**Min message length:** {_DUPE_MIN_LENGTH} chars\n"
+                    f"**Bypassed users ({len(bypass_ids)}):** {bypass_str}"
+                ),
+                color=_COLOR_INFO,
+            ),
         )
 
     # =========================================================================
@@ -1282,6 +1465,11 @@ class ModerationCog(fluxer.Cog):
 
     async def _check_duplicates(self, message: fluxer.Message) -> None:
         """Detect the same message being sent across multiple channels rapidly."""
+        # Skip bypassed users.
+        bypass_ids: list = self.settings.get(message.guild_id, "antispam_bypass") or []
+        if message.author.id in bypass_ids:
+            return
+
         content = message.content.strip()
 
         # Skip very short messages and common phrases.
@@ -1343,7 +1531,7 @@ class ModerationCog(fluxer.Cog):
 
             if channel:
                 try:
-                    await channel.send(
+                    sent = await channel.send(
                         embed=fluxer.Embed(
                             description=(
                                 f"{message.author.mention} you have been muted for 15 minutes "
@@ -1352,6 +1540,7 @@ class ModerationCog(fluxer.Cog):
                             color=_COLOR_BAD,
                         )
                     )
+                    asyncio.create_task(self._delete_after(sent, 300))
                 except Exception:
                     pass
 
@@ -1370,7 +1559,7 @@ class ModerationCog(fluxer.Cog):
             # First offence — warn only.
             if channel:
                 try:
-                    await channel.send(
+                    sent = await channel.send(
                         embed=fluxer.Embed(
                             description=(
                                 f"{message.author.mention} please do not send the same message "
@@ -1379,6 +1568,7 @@ class ModerationCog(fluxer.Cog):
                             color=_COLOR_WARN,
                         )
                     )
+                    asyncio.create_task(self._delete_after(sent, 300))
                 except Exception:
                     pass
 
