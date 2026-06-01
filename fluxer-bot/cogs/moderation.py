@@ -672,9 +672,9 @@ class ModerationCog(fluxer.Cog):
                 ctx,
                 embed=fluxer.Embed(
                     description=(
-                        f"`{config.COMMAND_PREFIX}antispam bypass add @user` — Exempt a user\n"
-                        f"`{config.COMMAND_PREFIX}antispam bypass remove @user` — Remove exemption\n"
-                        f"`{config.COMMAND_PREFIX}antispam bypass list` — Show bypassed users\n"
+                        f"`{config.COMMAND_PREFIX}antispam bypass add @user/@role` — Exempt a user or role\n"
+                        f"`{config.COMMAND_PREFIX}antispam bypass remove @user/@role` — Remove exemption\n"
+                        f"`{config.COMMAND_PREFIX}antispam bypass list` — Show bypassed users and roles\n"
                         f"`{config.COMMAND_PREFIX}antispam status` — Show filter settings"
                     ),
                     color=_COLOR_INFO,
@@ -682,27 +682,39 @@ class ModerationCog(fluxer.Cog):
             )
 
     async def _antispam_bypass(self, ctx: fluxer.Message, parts: list[str]) -> None:
-        """Handle !antispam bypass <add|remove|list> [@user]."""
+        """Handle !antispam bypass <add|remove|list> [@user/@role ...]."""
         action = parts[1].lower() if len(parts) > 1 else ""
 
         if action == "list":
-            bypass_ids: list = self.settings.get(ctx.guild_id, "antispam_bypass") or []
-            if not bypass_ids:
+            bypass_ids: list       = self.settings.get(ctx.guild_id, "antispam_bypass") or []
+            bypass_role_ids: list  = self.settings.get(ctx.guild_id, "antispam_bypass_roles") or []
+
+            if not bypass_ids and not bypass_role_ids:
                 await self._reply_autodelete(
                     ctx,
                     embed=fluxer.Embed(
-                        description="No users are currently bypassing the anti-spam filter.",
+                        description="No users or roles are currently bypassing the anti-spam filter.",
                         color=_COLOR_INFO,
                     ),
                 )
                 return
 
-            lines = "\n".join(f"<@{uid}> (`{uid}`)" for uid in bypass_ids)
+            lines = []
+            if bypass_ids:
+                lines.append("**Users**")
+                lines.extend(f"<@{uid}> (`{uid}`)" for uid in bypass_ids)
+            if bypass_role_ids:
+                if lines:
+                    lines.append("")
+                lines.append("**Roles**")
+                lines.extend(f"<@&{rid}> (`{rid}`)" for rid in bypass_role_ids)
+
+            total = len(bypass_ids) + len(bypass_role_ids)
             await self._reply_autodelete(
                 ctx,
                 embed=fluxer.Embed(
-                    title=f"Anti-spam bypass list — {len(bypass_ids)} user(s)",
-                    description=lines,
+                    title=f"Anti-spam bypass list — {total} entr{'y' if total == 1 else 'ies'}",
+                    description="\n".join(lines),
                     color=_COLOR_INFO,
                 ),
             )
@@ -711,83 +723,80 @@ class ModerationCog(fluxer.Cog):
         if action not in ("add", "remove"):
             await self._reply_autodelete(
                 ctx,
-                f"Usage: `{config.COMMAND_PREFIX}antispam bypass add/remove @user` "
+                f"Usage: `{config.COMMAND_PREFIX}antispam bypass add/remove @user/@role` "
                 f"or `{config.COMMAND_PREFIX}antispam bypass list`",
             )
             return
 
-        if not ctx.mentions:
+        users = list(getattr(ctx, "mentions", None) or [])
+        roles = list(getattr(ctx, "role_mentions", None) or [])
+
+        if not users and not roles:
             await self._reply_autodelete(
                 ctx,
-                f"Please mention a user — e.g. "
-                f"`{config.COMMAND_PREFIX}antispam bypass {action} @user`",
+                f"Please mention a user or role — e.g. "
+                f"`{config.COMMAND_PREFIX}antispam bypass {action} @user` or `@role`",
             )
             return
 
-        target = ctx.mentions[0]
-        bypass_ids = self.settings.get(ctx.guild_id, "antispam_bypass") or []
+        bypass_ids      = self.settings.get(ctx.guild_id, "antispam_bypass") or []
+        bypass_role_ids = self.settings.get(ctx.guild_id, "antispam_bypass_roles") or []
+
+        result_lines = []
 
         if action == "add":
-            if target.id in bypass_ids:
-                await self._reply_autodelete(
-                    ctx,
-                    embed=fluxer.Embed(
-                        description=f"{target.mention} is already on the bypass list.",
-                        color=_COLOR_WARN,
-                    ),
-                )
-                return
-
-            bypass_ids.append(target.id)
-            self.settings.set(ctx.guild_id, "antispam_bypass", bypass_ids)
-            log.info(
-                "Added user %d to antispam bypass in guild %d", target.id, ctx.guild_id
-            )
-
-            await self._reply_autodelete(
-                ctx,
-                embed=fluxer.Embed(
-                    description=(
-                        f"✅ {target.mention} has been added to the anti-spam bypass list.\n"
-                        f"They will no longer be flagged for cross-channel duplicate messages."
-                    ),
-                    color=_COLOR_OK,
-                ),
-            )
-
+            for user in users:
+                if user.id in bypass_ids:
+                    result_lines.append(f"⚠️ {user.mention} is already on the bypass list")
+                else:
+                    bypass_ids.append(user.id)
+                    result_lines.append(f"✅ Added user {user.mention}")
+                    log.info("Added user %d to antispam bypass in guild %d", user.id, ctx.guild_id)
+            for role in roles:
+                if role.id in bypass_role_ids:
+                    result_lines.append(f"⚠️ {role.mention} is already on the bypass list")
+                else:
+                    bypass_role_ids.append(role.id)
+                    result_lines.append(f"✅ Added role {role.mention}")
+                    log.info("Added role %d to antispam bypass in guild %d", role.id, ctx.guild_id)
         else:  # remove
-            if target.id not in bypass_ids:
-                await self._reply_autodelete(
-                    ctx,
-                    embed=fluxer.Embed(
-                        description=f"{target.mention} is not on the bypass list.",
-                        color=_COLOR_WARN,
-                    ),
-                )
-                return
+            for user in users:
+                if user.id not in bypass_ids:
+                    result_lines.append(f"⚠️ {user.mention} is not on the bypass list")
+                else:
+                    bypass_ids.remove(user.id)
+                    result_lines.append(f"✅ Removed user {user.mention}")
+                    log.info("Removed user %d from antispam bypass in guild %d", user.id, ctx.guild_id)
+            for role in roles:
+                if role.id not in bypass_role_ids:
+                    result_lines.append(f"⚠️ {role.mention} is not on the bypass list")
+                else:
+                    bypass_role_ids.remove(role.id)
+                    result_lines.append(f"✅ Removed role {role.mention}")
+                    log.info("Removed role %d from antispam bypass in guild %d", role.id, ctx.guild_id)
 
-            bypass_ids.remove(target.id)
-            self.settings.set(ctx.guild_id, "antispam_bypass", bypass_ids)
-            log.info(
-                "Removed user %d from antispam bypass in guild %d", target.id, ctx.guild_id
-            )
+        self.settings.set(ctx.guild_id, "antispam_bypass", bypass_ids)
+        self.settings.set(ctx.guild_id, "antispam_bypass_roles", bypass_role_ids)
 
-            await self._reply_autodelete(
-                ctx,
-                embed=fluxer.Embed(
-                    description=(
-                        f"✅ {target.mention} has been removed from the anti-spam bypass list.\n"
-                        f"They are now subject to cross-channel duplicate detection again."
-                    ),
-                    color=_COLOR_OK,
-                ),
-            )
+        any_success = any(l.startswith("✅") for l in result_lines)
+        await self._reply_autodelete(
+            ctx,
+            embed=fluxer.Embed(
+                description="\n".join(result_lines),
+                color=_COLOR_OK if any_success else _COLOR_WARN,
+            ),
+        )
 
     async def _antispam_status(self, ctx: fluxer.Message) -> None:
         """Show the current duplicate-detection settings."""
-        bypass_ids: list = self.settings.get(ctx.guild_id, "antispam_bypass") or []
-        bypass_str = (
+        bypass_ids: list      = self.settings.get(ctx.guild_id, "antispam_bypass") or []
+        bypass_role_ids: list = self.settings.get(ctx.guild_id, "antispam_bypass_roles") or []
+
+        bypass_users_str = (
             ", ".join(f"<@{uid}>" for uid in bypass_ids) if bypass_ids else "None"
+        )
+        bypass_roles_str = (
+            ", ".join(f"<@&{rid}>" for rid in bypass_role_ids) if bypass_role_ids else "None"
         )
 
         await self._reply_autodelete(
@@ -800,7 +809,8 @@ class ModerationCog(fluxer.Cog):
                     f"**Timeout at:** {_DUPE_TIMEOUT_THRESHOLD}+ channels "
                     f"({_DUPE_TIMEOUT_SECONDS // 60} min)\n"
                     f"**Min message length:** {_DUPE_MIN_LENGTH} chars\n"
-                    f"**Bypassed users ({len(bypass_ids)}):** {bypass_str}"
+                    f"**Bypassed users ({len(bypass_ids)}):** {bypass_users_str}\n"
+                    f"**Bypassed roles ({len(bypass_role_ids)}):** {bypass_roles_str}"
                 ),
                 color=_COLOR_INFO,
             ),
@@ -1469,6 +1479,16 @@ class ModerationCog(fluxer.Cog):
         bypass_ids: list = self.settings.get(message.guild_id, "antispam_bypass") or []
         if message.author.id in bypass_ids:
             return
+
+        # Skip members who hold a bypassed role.
+        bypass_role_ids: list = self.settings.get(message.guild_id, "antispam_bypass_roles") or []
+        if bypass_role_ids:
+            author_role_ids = {
+                getattr(r, "id", r)
+                for r in (getattr(message.author, "roles", None) or [])
+            }
+            if author_role_ids & set(bypass_role_ids):
+                return
 
         content = message.content.strip()
 
