@@ -34,18 +34,37 @@ Storage layout in guild_settings.json under key "modrinth":
         "default_loader": "fabric" | null,
         "tracked": {
             "<project_id>": {
-                "channel_id":     123,
-                "roles":          [456, 789],
-                "mc_versions":    ["1.21.4"],
-                "loader":         "fabric" | null,
-                "last_version_id": "abc123" | null,
-                "project_name":   "Sodium"
+                "channel_id":        123,
+                "roles":             [456, 789],
+                "mc_versions":       ["1.21.4"],
+                "loader":            "fabric" | null,
+                "last_version_id":   "abc123" | null,
+                "known_version_ids": ["abc123", ...],   # filtered IDs already seen
+                "meta_fingerprint":  "<sha1>",          # global-state hash; skips
+                                                        # the /version call when a
+                                                        # project hasn't changed
+                "needs_reseed":      false,             # set when the MC/loader
+                                                        # filter changes → next
+                                                        # poll re-baselines silently
+                "project_name":      "Sodium"
             }
         }
     }
+
+Robustness notes
+~~~~~~~~~~~~~~~~
+* Changing the tracked Minecraft version / loader does NOT spam updates. The
+  affected entries are flagged ``needs_reseed`` and the next poll records the
+  versions newly visible under the changed filter as the baseline, silently.
+* API usage is minimised: each poll batches project metadata in one call and
+  uses ``meta_fingerprint`` to skip the per-project /version call for anything
+  that hasn't changed since last time (Modrinth allows 300 req/min per IP).
+* Bursts of updates to the same channel are collapsed into a single digest
+  message with one ping instead of one pinging message per mod.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -70,13 +89,30 @@ _COLOR_UPDATE   = 0x1BD96A   # Modrinth green
 _COLOR_INFO     = 0x5865F2   # Standard bot blue
 _MIN_INTERVAL   = 60         # minimum poll interval (seconds)
 
-# Rate-limit safety: pause between version-list calls when remaining budget is low
-_RL_PAUSE_THRESHOLD = 5      # pause when X-Ratelimit-Remaining drops to this
+# Rate-limit safety: pause between version-list calls when remaining budget is low.
+# Modrinth allows 300 requests/min per IP. X-Ratelimit-Reset is the number of
+# SECONDS until the window resets (a countdown), NOT a unix timestamp.
+_RL_PAUSE_THRESHOLD = 10     # pause when X-Ratelimit-Remaining drops to this
 _RL_PAUSE_BUFFER    = 2      # extra seconds added on top of the reset window
 
 # 429 retry policy
 _MAX_RETRIES     = 3
 _RETRY_BASE_WAIT = 5         # seconds for first retry; doubles each attempt
+
+# Batched metadata lookups: max project ids per GET /projects call (keeps the
+# query-string URL comfortably short). The poll loop fetches metadata for every
+# tracked project in these chunks and uses it to skip unchanged projects.
+_MAX_IDS_PER_BATCH = 100
+
+# Small spacing between the (now-rare) per-project version calls so a burst of
+# changes never slams the API all at once.
+_INTER_CALL_DELAY = 0.2
+
+# Notification batching: when more than this many updates target the SAME
+# channel + role set in a single poll cycle, collapse them into one digest
+# message with a single ping instead of one pinging message per mod.
+_DIGEST_THRESHOLD = 3
+_DIGEST_MAX_ITEMS = 20       # max mods listed per digest embed
 
 _VALID_LOADERS = frozenset({
     "fabric", "forge", "quilt", "neoforge",
@@ -144,15 +180,20 @@ async def _check_rate_limit(headers: dict) -> None:
     """
     Inspect Modrinth rate-limit response headers and sleep proactively
     if the remaining request budget is running low.
+
+    Note: ``X-Ratelimit-Reset`` is the number of SECONDS until the limit
+    window resets (a countdown), so we sleep for that many seconds directly
+    — we must NOT subtract ``time.time()`` from it (that was an old bug that
+    made this pause a no-op).
     """
     try:
-        remaining = int(headers.get("X-Ratelimit-Remaining", 999))
-        reset_ts   = int(headers.get("X-Ratelimit-Reset", 0))
+        remaining   = int(headers.get("X-Ratelimit-Remaining", 999))
+        reset_after = int(headers.get("X-Ratelimit-Reset", 0))
     except (ValueError, TypeError):
         return
 
-    if remaining <= _RL_PAUSE_THRESHOLD and reset_ts:
-        wait = max(0, reset_ts - int(time.time())) + _RL_PAUSE_BUFFER
+    if remaining <= _RL_PAUSE_THRESHOLD:
+        wait = max(0, reset_after) + _RL_PAUSE_BUFFER
         log.info(
             "Rate-limit budget low (%d remaining). Sleeping %ds until reset.",
             remaining, wait,
@@ -198,6 +239,26 @@ async def _batch_get_projects(
         return {}
 
     return {p["id"]: p for p in data if isinstance(p, dict) and "id" in p}
+
+
+def _meta_fingerprint(meta: dict) -> str:
+    """
+    Build a cheap, stable fingerprint of a project's *global* state from its
+    metadata (returned by GET /projects). It combines the ``updated`` timestamp
+    with the full set of version IDs, so the fingerprint changes whenever a
+    version is published, removed, or edited.
+
+    The poll loop stores this per tracked project and, on the next cycle, skips
+    the (rate-limited) per-project /version call entirely when the fingerprint
+    is unchanged — turning N+1 calls per cycle into roughly one batched call.
+
+    A salted ``hash()`` is unsuitable here because the value is persisted to
+    disk across restarts, so we use a stable SHA-1 digest instead.
+    """
+    updated  = str(meta.get("updated", ""))
+    versions = meta.get("versions") or []
+    raw = updated + "|" + ",".join(sorted(str(v) for v in versions))
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +373,57 @@ def _build_update_embed(project: dict, version: dict) -> fluxer.Embed:
     return embed
 
 
+def _build_digest_embeds(items: list[tuple]) -> list[fluxer.Embed]:
+    """
+    Build one or more compact "digest" embeds summarising many updates at once.
+
+    ``items`` is a list of ``(project_id, entry, version, meta)`` tuples that
+    all share a channel + role set. Used instead of many separate pinging
+    messages when a single poll cycle would otherwise spam a channel (e.g.
+    right after a Minecraft release when dozens of mods update together).
+    """
+    total = len(items)
+    lines: list[str] = []
+    for project_id, entry, version, meta in items:
+        meta = meta or {}
+        slug  = meta.get("slug") or meta.get("id") or project_id
+        title = meta.get("title") or entry.get("project_name") or project_id
+        ver   = version.get("version_number") or version.get("name") or "?"
+        url   = f"https://modrinth.com/mod/{slug}/version/{version['id']}"
+
+        loaders = ", ".join(version.get("loaders") or []) or "—"
+        mc      = version.get("game_versions") or []
+        mc_str  = ", ".join(mc[:3]) + ("…" if len(mc) > 3 else "") if mc else "—"
+
+        lines.append(f"• **[{title}]({url})** · `{ver}` · {loaders} · {mc_str}")
+
+    # Chunk into embeds that stay within Discord's 4096-char description limit.
+    embeds: list[fluxer.Embed] = []
+    chunk: list[str] = []
+    length = 0
+    for line in lines:
+        if chunk and (len(chunk) >= _DIGEST_MAX_ITEMS or length + len(line) + 1 > 3800):
+            embeds.append(_digest_embed(chunk, total, len(embeds)))
+            chunk, length = [], 0
+        chunk.append(line)
+        length += len(line) + 1
+    if chunk:
+        embeds.append(_digest_embed(chunk, total, len(embeds)))
+    return embeds
+
+
+def _digest_embed(lines: list[str], total: int, index: int) -> fluxer.Embed:
+    title = f"🆕 {total} mod updates" + (" (continued)" if index else "")
+    return (
+        fluxer.Embed(
+            title=title,
+            color=_COLOR_UPDATE,
+            description="\n".join(lines),
+        )
+        .set_footer(text="Grouped to avoid spam · click a mod to view its changelog")
+    )
+
+
 # ---------------------------------------------------------------------------
 # Cog
 # ---------------------------------------------------------------------------
@@ -372,23 +484,49 @@ class ModrinthCog(fluxer.Cog):
                 log.exception("Unhandled error in Modrinth poll loop: %s", exc)
 
     async def _check_all_guilds(self) -> None:
+        # Collect the union of every tracked project ID across all guilds and
+        # fetch their metadata ONCE (chunked). A project tracked in several
+        # guilds is then only fetched a single time, and each guild's check
+        # reuses this shared cache to decide what (if anything) changed.
+        all_ids: set[str] = set()
+        for guild in self.bot.guilds:
+            data = self.settings.get(guild.id, "modrinth") or {}
+            all_ids.update(data.get("tracked", {}).keys())
+
+        meta_cache = await self._fetch_metadata(list(all_ids)) if all_ids else {}
+
         for guild in self.bot.guilds:
             try:
-                await self._check_guild(guild.id)
+                await self._check_guild(guild.id, meta_cache)
             except Exception as exc:
                 log.warning("Error checking guild %d: %s", guild.id, exc)
 
-    async def _check_guild(self, guild_id: int) -> None:
+    async def _fetch_metadata(self, project_ids: list[str]) -> dict[str, dict]:
+        """Batch-fetch project metadata for many IDs, chunked to keep URLs short."""
+        meta: dict[str, dict] = {}
+        for i in range(0, len(project_ids), _MAX_IDS_PER_BATCH):
+            chunk = project_ids[i:i + _MAX_IDS_PER_BATCH]
+            meta.update(await _batch_get_projects(self._session, chunk))
+        return meta
+
+    async def _check_guild(self, guild_id: int, meta_cache: dict[str, dict] | None = None) -> None:
         """
         Poll all tracked projects for a guild.
 
         Optimised flow:
-          1. Fetch the version list for each project (one call each, unavoidable).
-          2. Collect every project that has a new version.
-          3. Batch-fetch metadata for those projects in a SINGLE API call.
-          4. Persist all updated last_version_ids to disk BEFORE sending any
+          1. Use batched project metadata (``meta_cache``) to compute a cheap
+             fingerprint per project. If a project's fingerprint is unchanged
+             since last cycle, skip it entirely — no per-project API call.
+          2. Only for projects that actually changed (or that were just
+             re-filtered) do we make the rate-limited /version call.
+          3. Entries flagged ``needs_reseed`` (because their MC/loader filter
+             was just changed) are silently re-baselined — their currently
+             visible versions are recorded WITHOUT notifying, so changing the
+             tracked Minecraft version never produces a flood of false pings.
+          4. Persist all baseline changes to disk BEFORE sending any
              notifications — prevents duplicate posts on crash or send failure.
-          5. Send notifications.
+          5. Send notifications, collapsing bursts into digests (see
+             ``_dispatch_notifications``).
         """
         data = self.settings.get(guild_id, "modrinth") or {}
         tracked: dict = data.get("tracked", {})
@@ -397,98 +535,171 @@ class ModrinthCog(fluxer.Cog):
 
         default_loader: str | None = data.get("default_loader")
 
-        # ── Step 1 & 2: find projects with a new version ───────────────────
-        # pending: list of (project_id, entry, latest_version_dict)
-        pending: list[tuple[str, dict, dict]] = []
+        # Make sure we have metadata for every tracked project. When called
+        # from the manual `!track check` command there is no shared cache, so
+        # fetch it here; otherwise fill in anything the shared cache missed.
+        if meta_cache is None:
+            meta_cache = {}
+        missing = [pid for pid in tracked if pid not in meta_cache]
+        if missing:
+            meta_cache = {**meta_cache, **await self._fetch_metadata(missing)}
+
+        # pending: list of (project_id, entry, latest_version_dict, meta)
+        pending: list[tuple[str, dict, dict, dict]] = []
+        changed = False  # whether any on-disk state needs persisting
 
         for project_id, entry in list(tracked.items()):
+            meta         = meta_cache.get(project_id)
+            needs_reseed = entry.get("needs_reseed", False)
+            fresh_fp     = _meta_fingerprint(meta) if meta else None
+            stored_fp    = entry.get("meta_fingerprint")
+
+            # Fast path: nothing changed globally and no re-baseline pending →
+            # skip the per-project version call completely.
+            if not needs_reseed and meta is not None and fresh_fp == stored_fp:
+                continue
+
+            loader = entry.get("loader") or default_loader
             try:
                 versions = await _get_versions(
                     self._session,
                     project_id,
-                    loaders=[entry.get("loader") or default_loader]
-                    if (entry.get("loader") or default_loader)
-                    else None,
+                    loaders=[loader] if loader else None,
                     game_versions=entry.get("mc_versions") or None,
                 )
             except Exception as exc:
                 log.warning("Error fetching versions for %s in guild %d: %s", project_id, guild_id, exc)
                 continue
+            await asyncio.sleep(_INTER_CALL_DELAY)
 
-            if not versions:
+            if versions is None:
+                # API failure — leave the fingerprint untouched so we retry
+                # this project next cycle instead of silently going stale.
                 continue
 
-            latest = next((v for v in versions if v.get("status") == "listed"), versions[0])
+            listed = [v for v in versions if v.get("status") == "listed"]
+            latest = listed[0] if listed else (versions[0] if versions else None)
+
+            # Record the new fingerprint now that we've successfully evaluated
+            # this project under its current filter.
+            if fresh_fp is not None and stored_fp != fresh_fp:
+                entry["meta_fingerprint"] = fresh_fp
+                changed = True
+
+            if needs_reseed:
+                # Silent re-baseline: treat everything currently visible under
+                # the (new) filter as already-known so we never alert on it.
+                entry["known_version_ids"] = [v["id"] for v in versions if v.get("id")][:20]
+                entry["last_version_id"]   = latest["id"] if latest else None
+                entry["needs_reseed"]      = False
+                changed = True
+                log.info(
+                    "Re-baselined %s in guild %d after filter change (%d version(s) recorded, no alert).",
+                    entry.get("project_name", project_id), guild_id, len(versions),
+                )
+                continue
+
+            if latest is None:
+                continue
 
             seen_ids = set(entry.get("known_version_ids") or [])
             # Backwards-compat: if no known_version_ids, fall back to last_version_id
-            if not seen_ids:
-                seen_ids = {entry.get("last_version_id")}
+            if not seen_ids and entry.get("last_version_id"):
+                seen_ids = {entry["last_version_id"]}
             if latest["id"] in seen_ids:
                 continue  # already up to date
 
-            pending.append((project_id, entry, latest))
+            pending.append((project_id, entry, latest, meta))
 
-        if not pending:
-            return
-
-        # ── Step 3: batch-fetch project metadata in one API call ───────────
-        project_ids_to_fetch = [pid for pid, _, _ in pending]
-        projects_meta = await _batch_get_projects(self._session, project_ids_to_fetch)
-
-        # ── Step 4: persist ALL new last_version_ids BEFORE sending ────────
-        # This is the critical fix: if a send fails or the process crashes
-        # mid-loop, the IDs are already on disk so we won't re-notify.
-        for project_id, entry, latest in pending:
+        # ── Persist ALL baseline changes BEFORE sending ────────────────────
+        # If a send fails or the process crashes mid-loop, the IDs are already
+        # on disk so we won't re-notify.
+        for project_id, entry, latest, meta in pending:
             entry["last_version_id"] = latest["id"]
             known_ids = list(entry.get("known_version_ids", []))
             if latest["id"] not in known_ids:
                 known_ids.insert(0, latest["id"])
-            if len(known_ids) > 20:
-                known_ids = known_ids[:20]
-            entry["known_version_ids"] = known_ids
-            # Update cached project name if we got fresh metadata
-            meta = projects_meta.get(project_id)
+            entry["known_version_ids"] = known_ids[:20]
             if meta:
                 entry["project_name"] = meta.get("title", project_id)
+            changed = True
 
-        self.settings.set(guild_id, "modrinth", data)
-        log.debug(
-            "Persisted %d new version ID(s) for guild %d before sending notifications.",
-            len(pending), guild_id,
-        )
+        if changed:
+            self.settings.set(guild_id, "modrinth", data)
+        if pending:
+            log.debug(
+                "Persisted %d new version ID(s) for guild %d before sending notifications.",
+                len(pending), guild_id,
+            )
+            await self._dispatch_notifications(guild_id, pending)
 
-        # ── Step 5: send notifications ─────────────────────────────────────
-        for project_id, entry, latest in pending:
-            meta = projects_meta.get(project_id)
-            if not meta:
-                log.warning(
-                    "No metadata returned for project %s in guild %d — skipping notification.",
-                    project_id, guild_id,
-                )
-                continue
+    async def _dispatch_notifications(
+        self, guild_id: int, pending: list[tuple[str, dict, dict, dict]]
+    ) -> None:
+        """
+        Send update notifications, grouping by destination channel + role set.
 
-            channel = self.bot._channels.get(entry["channel_id"])
+        Each group that exceeds ``_DIGEST_THRESHOLD`` is collapsed into a single
+        digest message (one ping, all mods listed) instead of one pinging
+        message per mod — so changing the tracked MC version, or a Minecraft
+        release that updates dozens of mods at once, never spams 60 pings.
+        """
+        groups: dict[tuple[int, frozenset], list[tuple]] = {}
+        for project_id, entry, latest, meta in pending:
+            key = (entry["channel_id"], frozenset(entry.get("roles") or []))
+            groups.setdefault(key, []).append((project_id, entry, latest, meta))
+
+        for (channel_id, roles), items in groups.items():
+            channel = self.bot._channels.get(channel_id)
             if channel is None:
                 log.warning(
-                    "Notification channel %d not found for project %s in guild %d",
-                    entry["channel_id"], project_id, guild_id,
+                    "Notification channel %d not found for guild %d — skipping %d update(s)",
+                    channel_id, guild_id, len(items),
                 )
                 continue
 
-            embed        = _build_update_embed(meta, latest)
-            role_mentions = " ".join(f"<@&{rid}>" for rid in entry.get("roles") or [])
+            role_mentions = " ".join(f"<@&{rid}>" for rid in roles)
 
-            try:
-                await channel.send(content=role_mentions, embed=embed)
+            if len(items) <= _DIGEST_THRESHOLD:
+                # Few updates: post the full rich embed for each, as before.
+                for project_id, entry, latest, meta in items:
+                    if not meta:
+                        log.warning(
+                            "No metadata for project %s in guild %d — skipping notification.",
+                            project_id, guild_id,
+                        )
+                        continue
+                    try:
+                        await channel.send(
+                            content=role_mentions,
+                            embed=_build_update_embed(meta, latest),
+                        )
+                        log.info(
+                            "Posted update for %s (%s) in guild %d",
+                            meta.get("title", project_id), latest["id"], guild_id,
+                        )
+                    except Exception as exc:
+                        log.exception(
+                            "Failed to send notification for %s in guild %d: %s",
+                            project_id, guild_id, exc,
+                        )
+            else:
+                # Many updates to one place: collapse into digest(s), ping once.
+                embeds = _build_digest_embeds(items)
+                for idx, embed in enumerate(embeds):
+                    try:
+                        await channel.send(
+                            content=role_mentions if idx == 0 else None,
+                            embed=embed,
+                        )
+                    except Exception as exc:
+                        log.exception(
+                            "Failed to send digest to channel %d in guild %d: %s",
+                            channel_id, guild_id, exc,
+                        )
                 log.info(
-                    "Posted update for %s (%s) in guild %d",
-                    meta.get("title", project_id), latest["id"], guild_id,
-                )
-            except Exception as exc:
-                log.exception(
-                    "Failed to send notification for %s in guild %d: %s",
-                    project_id, guild_id, exc,
+                    "Posted digest of %d updates to channel %d in guild %d",
+                    len(items), channel_id, guild_id,
                 )
 
     # =========================================================================
@@ -606,6 +817,7 @@ class ModrinthCog(fluxer.Cog):
             "loader":          loader,
             "last_version_id": latest_id,
             "known_version_ids": known_ids[:20],
+            "meta_fingerprint": _meta_fingerprint(project),
             "project_name":    project.get("title", project_id),
         }
 
@@ -712,6 +924,7 @@ class ModrinthCog(fluxer.Cog):
                     "loader":          loader,
                     "last_version_id": latest_id,
                     "known_version_ids": known_ids[:20],
+                    "meta_fingerprint": _meta_fingerprint(project),
                     "project_name":    project.get("title", pid),
                 }
                 added.append(project.get("title", pid))
@@ -893,11 +1106,23 @@ class ModrinthCog(fluxer.Cog):
 
         data = self.settings.get(ctx.guild_id, "modrinth") or {}
 
+        # Changing the server default changes the *effective* loader filter for
+        # every project that doesn't set its own — re-baseline those so the
+        # change doesn't masquerade as a wave of new versions.
+        def _reseed_default_dependents() -> None:
+            for entry in data.get("tracked", {}).values():
+                if not entry.get("loader"):
+                    entry["needs_reseed"] = True
+
         if len(args) < 2:
             data["default_loader"] = None
+            _reseed_default_dependents()
             self.settings.set(ctx.guild_id, "modrinth", data)
             await self._reply(ctx, embed=fluxer.Embed(
-                description="Default loader cleared — projects will match any loader.",
+                description=(
+                    "Default loader cleared — projects will match any loader.\n"
+                    "_Mods using the default are re-baselined; no false alerts will fire._"
+                ),
                 color=_COLOR_INFO,
             ))
             return
@@ -911,9 +1136,13 @@ class ModrinthCog(fluxer.Cog):
             return
 
         data["default_loader"] = loader
+        _reseed_default_dependents()
         self.settings.set(ctx.guild_id, "modrinth", data)
         await self._reply(ctx, embed=fluxer.Embed(
-            description=f"Default loader set to **{loader}**.",
+            description=(
+                f"Default loader set to **{loader}**.\n"
+                "_Mods using the default are re-baselined; no false alerts will fire._"
+            ),
             color=_COLOR_INFO,
         ))
 
@@ -961,11 +1190,14 @@ class ModrinthCog(fluxer.Cog):
             return
         versions = args[1:]
         entry["mc_versions"] = versions or None
+        entry["needs_reseed"] = True
         self.settings.set(ctx.guild_id, "modrinth", data)
         await self._reply(ctx, embed=fluxer.Embed(
             description=(
                 f"MC filter for **{entry.get('project_name', args[0])}** → "
-                f"`{', '.join(versions) if versions else 'Any'}`."
+                f"`{', '.join(versions) if versions else 'Any'}`.\n"
+                f"_Current versions for the new filter are recorded as baseline — "
+                f"no false update alert will fire._"
             ),
             color=_COLOR_INFO,
         ))
@@ -983,11 +1215,14 @@ class ModrinthCog(fluxer.Cog):
             await ctx.reply(content=f"`{loader}` is not a valid loader.")
             return
         entry["loader"] = loader
+        entry["needs_reseed"] = True
         self.settings.set(ctx.guild_id, "modrinth", data)
         await self._reply(ctx, embed=fluxer.Embed(
             description=(
                 f"Loader filter for **{entry.get('project_name', args[0])}** → "
-                f"`{loader or 'Any'}`."
+                f"`{loader or 'Any'}`.\n"
+                f"_Current versions for the new filter are recorded as baseline — "
+                f"no false update alert will fire._"
             ),
             color=_COLOR_INFO,
         ))
@@ -1015,9 +1250,14 @@ class ModrinthCog(fluxer.Cog):
         versions = args or None
         for entry in tracked.values():
             entry["mc_versions"] = versions
+            entry["needs_reseed"] = True
         self.settings.set(ctx.guild_id, "modrinth", data)
         await self._reply(ctx, embed=fluxer.Embed(
-            description=f"MC filter for all mods → `{', '.join(versions) if versions else 'Any'}`.",
+            description=(
+                f"MC filter for all mods → `{', '.join(versions) if versions else 'Any'}`.\n"
+                f"_Existing versions for the new filter are recorded as baseline — "
+                f"this will **not** trigger a wave of update alerts._"
+            ),
             color=_COLOR_INFO,
         ))
 
@@ -1030,9 +1270,14 @@ class ModrinthCog(fluxer.Cog):
         tracked = data.get("tracked", {})
         for entry in tracked.values():
             entry["loader"] = loader
+            entry["needs_reseed"] = True
         self.settings.set(ctx.guild_id, "modrinth", data)
         await self._reply(ctx, embed=fluxer.Embed(
-            description=f"Loader filter for all mods → `{loader or 'Any'}`.",
+            description=(
+                f"Loader filter for all mods → `{loader or 'Any'}`.\n"
+                f"_Existing versions for the new filter are recorded as baseline — "
+                f"this will **not** trigger a wave of update alerts._"
+            ),
             color=_COLOR_INFO,
         ))
 
@@ -1053,11 +1298,14 @@ class ModrinthCog(fluxer.Cog):
             return
         for entry in affected:
             entry["mc_versions"] = versions
+            entry["needs_reseed"] = True
         self.settings.set(ctx.guild_id, "modrinth", data)
         await self._reply(ctx, embed=fluxer.Embed(
             description=(
                 f"MC filter for **{len(affected)}** mod(s) in <#{channel_id}> → "
-                f"`{', '.join(versions) if versions else 'Any'}`."
+                f"`{', '.join(versions) if versions else 'Any'}`.\n"
+                f"_Existing versions for the new filter are recorded as baseline — "
+                f"this will **not** trigger a wave of update alerts._"
             ),
             color=_COLOR_INFO,
         ))
@@ -1082,10 +1330,13 @@ class ModrinthCog(fluxer.Cog):
             return
         for entry in affected:
             entry["loader"] = loader
+            entry["needs_reseed"] = True
         self.settings.set(ctx.guild_id, "modrinth", data)
         await self._reply(ctx, embed=fluxer.Embed(
             description=(
-                f"Loader for **{len(affected)}** mod(s) in <#{channel_id}> → `{loader or 'Any'}`."
+                f"Loader for **{len(affected)}** mod(s) in <#{channel_id}> → `{loader or 'Any'}`.\n"
+                f"_Existing versions for the new filter are recorded as baseline — "
+                f"this will **not** trigger a wave of update alerts._"
             ),
             color=_COLOR_INFO,
         ))
