@@ -38,7 +38,9 @@ Commands (all require the relevant Fluxer permission):
 Automatic protections (no commands needed):
     - Banned word filter
     - Cross-channel duplicate detection (45 s window)
-    - Honeypot channel enforcement
+    - Honeypot channel enforcement: the trigger message is deleted (no bot
+      reply is left behind), the sender is muted/timed out, and their
+      messages from the last hour are removed from every channel
 """
 
 import asyncio
@@ -73,6 +75,20 @@ _DUPE_TIMEOUT_THRESHOLD = 3
 
 # Minimum message length to bother tracking for duplicates
 _DUPE_MIN_LENGTH = 8
+
+# How long (days) to timeout a honeypot offender when action mode is "timeout"
+_HONEYPOT_TIMEOUT_DAYS = 7
+
+# When the honeypot triggers, delete the offender's messages from the last
+# hour across all channels (bots usually spam several channels at once).
+_HONEYPOT_PURGE_WINDOW_SECONDS = 3600
+
+# How many recent messages to scan per channel during the honeypot purge
+_HONEYPOT_PURGE_FETCH_LIMIT = 50
+
+# Snowflake epoch (2015-01-01) — used to derive message timestamps when the
+# platform's message object does not expose created_at.
+_SNOWFLAKE_EPOCH_MS = 1420070400000
 
 # Common words/phrases that are too short or generic to track
 _DUPE_SKIP = frozenset({
@@ -1225,12 +1241,14 @@ class ModerationCog(fluxer.Cog):
         )
 
         warning_embed = fluxer.Embed(
-            title="⚠️ Restricted Channel",
+            title="🛑 Do Not Type Here",
             description=(
-                "**Do not write in this channel.**\n\n"
-                "This is a restricted area. Any message sent here will result in "
-                "a restricted role being applied until a moderator reviews your case.\n\n"
-                "If you ended up here by accident, please leave without typing anything."
+                "**Anything sent in this channel gets you muted — this channel "
+                "exists to catch bots.**\n\n"
+                "Messages sent here are deleted automatically, the sender is muted "
+                "until a moderator reviews the case, and their recent messages are "
+                "removed as well.\n\n"
+                "If you ended up here by accident, just leave — don't send anything."
             ),
             color=_COLOR_WARN,
         ).set_footer(text="This warning was posted automatically by the moderation bot.")
@@ -1338,22 +1356,18 @@ class ModerationCog(fluxer.Cog):
                     message.guild_id,
                 )
 
-        # Warn in the honeypot channel.
-        channel = self.bot._channels.get(message.channel_id)
+        # No bot message is left in the honeypot channel — the trigger message
+        # is deleted and the channel stays clean.
 
-        if channel:
-            try:
-                warn_embed = fluxer.Embed(
-                    title="User Restricted",
-                    description=(
-                        f"{message.author.mention} has been restricted for writing in a restricted channel.\n"
-                        "A moderator will review this."
-                    ),
-                    color=_COLOR_BAD,
-                )
-                await channel.send(embed=warn_embed)
-            except Exception as exc:
-                log.warning("Could not send honeypot warning message: %s", exc)
+        # Sweep the offender's messages from the last hour across all channels
+        # (spam bots usually hit several channels before landing in the honeypot).
+        purged_count = 0
+        try:
+            purged_count = await self._purge_recent_user_messages(
+                message.guild_id, message.author.id
+            )
+        except Exception as exc:
+            log.error("Honeypot recent-message purge failed: %s", exc)
 
         # Truncate long messages but keep enough for context.
         raw_content = message.content.strip()
@@ -1399,6 +1413,7 @@ class ModerationCog(fluxer.Cog):
                 ("Channel", channel_ref),
                 ("Mode", action_mode),
                 ("Action Applied", action_status),
+                ("Recent Messages Purged (1 h)", str(purged_count)),
                 ("Message Content", display_content),
                 ("⬆️ To Restore", restore_hint),
             ],
@@ -1419,6 +1434,90 @@ class ModerationCog(fluxer.Cog):
         )
 
         return True
+
+    # ── Honeypot helpers — recent-message purge ───────────────────────────────
+
+    @staticmethod
+    async def _fetch_recent_messages(channel, limit: int) -> list:
+        """Fetch the last *limit* messages from a channel on either platform.
+
+        Fluxer channels expose ``fetch_messages(limit=...)``; discord.py
+        channels (via the shim's proxy) expose ``history(limit=...)``.
+        """
+        fetch = getattr(channel, "fetch_messages", None)
+        if fetch is not None:
+            return await fetch(limit=limit)
+
+        history = getattr(channel, "history", None)
+        if history is not None:
+            return [m async for m in history(limit=limit)]
+
+        return []
+
+    @staticmethod
+    def _message_age_seconds(msg) -> float | None:
+        """Best-effort age of a message in seconds, or None if undeterminable."""
+        created = getattr(msg, "created_at", None)
+        if created is not None:
+            try:
+                return (datetime.now(timezone.utc) - created).total_seconds()
+            except TypeError:
+                pass  # naive datetime — fall through to the snowflake path
+
+        msg_id = getattr(msg, "id", None)
+        if msg_id:
+            try:
+                created_ms = (int(msg_id) >> 22) + _SNOWFLAKE_EPOCH_MS
+                return time.time() - created_ms / 1000
+            except (ValueError, TypeError):
+                pass
+
+        return None
+
+    async def _purge_recent_user_messages(self, guild_id: int, user_id: int) -> int:
+        """Delete *user_id*'s messages from the last hour in every text channel.
+
+        Scans the most recent _HONEYPOT_PURGE_FETCH_LIMIT messages per channel.
+        Returns the number of messages deleted.
+        """
+        deleted = 0
+
+        for channel in list(self.bot._channels.values()):
+            if channel.guild_id != guild_id or not channel.is_text_channel:
+                continue
+
+            try:
+                messages = await self._fetch_recent_messages(
+                    channel, _HONEYPOT_PURGE_FETCH_LIMIT
+                )
+            except Exception as exc:
+                log.debug("Honeypot purge: could not read #%s: %s", channel.name, exc)
+                continue
+
+            for msg in messages:
+                author = getattr(msg, "author", None)
+                if getattr(author, "id", None) != user_id:
+                    continue
+
+                age = self._message_age_seconds(msg)
+                if age is None or age > _HONEYPOT_PURGE_WINDOW_SECONDS:
+                    continue
+
+                try:
+                    await msg.delete()
+                    deleted += 1
+                except Exception as exc:
+                    log.debug(
+                        "Honeypot purge: could not delete message %s in #%s: %s",
+                        getattr(msg, "id", "?"), channel.name, exc,
+                    )
+
+        if deleted:
+            log.info(
+                "Honeypot purge removed %d recent message(s) from user %d in guild %d",
+                deleted, user_id, guild_id,
+            )
+        return deleted
 
     # ── Auto-mod: banned words ────────────────────────────────────────────────
 
