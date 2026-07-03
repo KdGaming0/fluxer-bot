@@ -24,6 +24,11 @@ Commands (require Manage Guild):
     !crash channel add #channel                   - Watch a channel for logs
     !crash channel remove #channel                - Stop watching a channel
     !crash channel list                           - List watched channels
+
+On Discord, ``channel add`` also accepts forum channels (watches every
+post in the forum) and categories (watches every channel under the
+category — handy for ticket-bot channels created on the fly). Categories
+have no #mention, so reference them by exact name or ID.
     !crash on / off                               - Toggle the whole feature
     !crash status                                 - Show current configuration
 
@@ -46,6 +51,7 @@ import aiohttp
 import fluxer
 import config
 from utils.storage import GuildSettings
+from utils.watch import is_watchable_channel, message_in_watched
 
 log = logging.getLogger("cog.crash_detect")
 
@@ -337,9 +343,12 @@ class CrashDetectCog(fluxer.Cog):
         match = re.search(r"<#(\d+)>", arg)
         if match:
             return self.bot._channels.get(int(match.group(1)))
-        name = arg.lstrip("#").strip()
+        # Raw ID — the only way to reference a category, which has no <#…> mention.
+        if arg.strip().isdigit():
+            return self.bot._channels.get(int(arg.strip()))
+        name = arg.lstrip("#").strip().lower()
         for ch in self.bot._channels.values():
-            if ch.guild_id == ctx.guild_id and ch.name == name:
+            if ch.guild_id == ctx.guild_id and ch.name.lower() == name:
                 return ch
         return None
 
@@ -365,25 +374,38 @@ class CrashDetectCog(fluxer.Cog):
 
         if action not in ("add", "remove") or not arg:
             await ctx.reply(
-                f"Usage: `{config.COMMAND_PREFIX}crash channel add/remove #channel` "
-                f"or `{config.COMMAND_PREFIX}crash channel list`"
+                f"Usage: `{config.COMMAND_PREFIX}crash channel add/remove <#channel | name | ID>` "
+                f"or `{config.COMMAND_PREFIX}crash channel list`\n"
+                "Forum channels and categories work too (Discord): watching a forum "
+                "covers every post in it, watching a category covers every channel "
+                "under it (e.g. ticket channels). Reference a category by name or ID."
             )
             return
 
         channel = self._resolve_channel(ctx, arg)
-        if channel is None or not channel.is_text_channel:
-            await ctx.reply("Could not find that text channel.")
+        if channel is None or not is_watchable_channel(channel):
+            await ctx.reply(
+                "Could not find that channel. Use a #mention, exact name, or ID — "
+                "text channels, forum channels, and categories are supported."
+            )
             return
+
+        if getattr(channel, "is_category", False):
+            label = f"category **{channel.name}** (all channels under it)"
+        elif getattr(channel, "is_forum_channel", False):
+            label = f"forum **{channel.name}** (all posts in it)"
+        else:
+            label = f"**#{channel.name}**"
 
         if action == "add":
             if channel.id in channels:
-                await ctx.reply(f"**#{channel.name}** is already being watched.")
+                await ctx.reply(f"{label} is already being watched.")
                 return
             channels.append(channel.id)
             verb = "now watched for known crashes"
         else:
             if channel.id not in channels:
-                await ctx.reply(f"**#{channel.name}** is not being watched.")
+                await ctx.reply(f"{label} is not being watched.")
                 return
             channels.remove(channel.id)
             verb = "no longer watched"
@@ -391,7 +413,7 @@ class CrashDetectCog(fluxer.Cog):
         self.settings.set(ctx.guild_id, "crash_channels", channels)
         await ctx.reply(
             embed=fluxer.Embed(
-                description=f"**#{channel.name}** is {verb}.",
+                description=f"{label} is {verb}.",
                 color=_COLOR_OK,
             )
         )
@@ -436,7 +458,7 @@ class CrashDetectCog(fluxer.Cog):
             return
 
         channels: list = self.settings.get(message.guild_id, "crash_channels") or []
-        if message.channel_id not in channels:
+        if not message_in_watched(message, channels):
             return
 
         signatures = self._get_signatures(message.guild_id)

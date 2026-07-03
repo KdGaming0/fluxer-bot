@@ -179,14 +179,19 @@ class _ChannelProxy:
             self.name         = self._ch.name
             guild             = getattr(self._ch, "guild", None)
             self.guild_id     = guild.id if guild else None
-            self.is_text_channel = isinstance(self._ch, discord.TextChannel)
+            self.is_text_channel  = isinstance(self._ch, discord.TextChannel)
+            self.is_forum_channel = isinstance(self._ch, discord.ForumChannel)
+            self.is_category      = isinstance(self._ch, discord.CategoryChannel)
         else:
             self.id           = int(self._data.get("id", 0))
             self.name         = self._data.get("name", "")
             gid               = self._data.get("guild_id")
             self.guild_id     = int(gid) if gid else None
-            # type 0 = GUILD_TEXT
-            self.is_text_channel = self._data.get("type", 0) == 0
+            # type 0 = GUILD_TEXT, 4 = GUILD_CATEGORY, 15 = GUILD_FORUM
+            ch_type = self._data.get("type", 0)
+            self.is_text_channel  = ch_type == 0
+            self.is_forum_channel = ch_type == 15
+            self.is_category      = ch_type == 4
 
     async def send(self, content=None, embed=None, **kwargs):
         if self._ch is not None:
